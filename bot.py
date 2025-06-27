@@ -18,13 +18,13 @@ if TOKEN is None:
 
 # Bot-Intents
 intents = discord.Intents.default()
-intents.message_content = True  # für Prefix-Commands benötigt
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Speichert laufende Unlock-Timer: channel.id → Task
 lock_tasks: dict[int, asyncio.Task] = {}
 
-# Error-Handler für fehlende Argumente und Permissions
+# Error-Handler
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, MissingRequiredArgument):
@@ -48,9 +48,9 @@ async def lock(
     duration: int
 ):
     """
-    Sperrt beliebig viele Text- oder Sprachkanäle zur angegebenen Uhrzeit für `duration` Minuten.
+    Sperrt beliebig viele Text- oder Sprachkanäle zur angegebenen Uhrzeit
+    für `duration` Minuten.
     Usage: !lock #text1 #🔊Voice HH:MM Minuten
-    Beispiel: !lock 123… 456… 21:30 45
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
@@ -58,14 +58,13 @@ async def lock(
     # Uhrzeit parsen
     try:
         hour, minute = map(int, start_time.split(":"))
-        target_time = datetime.time(hour, minute)
     except ValueError:
         return await ctx.send("❌ Ungültiges Zeitformat. Bitte `HH:MM` im 24h-Format angeben.")
 
-    # Jetzt in Berlin-Zeit
+    # aktuelle Zeit in Berliner Zeitzone
     now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
-    # Zielzeit ebenfalls in Berlin für heute
-    target_dt = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+    # Ziel-Datetime in Berliner Zeit
+    target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target_dt <= now:
         target_dt += datetime.timedelta(days=1)
     delay_until_lock = (target_dt - now).total_seconds()
@@ -73,32 +72,49 @@ async def lock(
     role = ctx.guild.default_role
 
     for channel in channels:
-        # Bestehende Tasks abbrechen
+        # evtl. bestehenden Task abbrechen
         if channel.id in lock_tasks:
             lock_tasks[channel.id].cancel()
 
-        # Task planen: erst sperren, dann nach duration entsperren
         async def _scheduled_lock(ch: discord.abc.GuildChannel, delay: float, dur: int):
+            # Warte bis zur Startzeit
             await asyncio.sleep(delay)
+
             # Sperre setzen
             if isinstance(ch, discord.TextChannel):
                 await ch.set_permissions(role, send_messages=False)
-            else:  # VoiceChannel
+            else:
+                # VoiceChannel: entziehe Connect & Speak
                 await ch.set_permissions(role, connect=False, speak=False)
+                # und kicke alle, die noch drin sind
+                for member in ch.members:
+                    try:
+                        await member.move_to(None)
+                    except Exception:
+                        pass
+
+            # Nachricht im Kanal
             await ch.send(
                 f"🔒 Kanal automatisch gesperrt um {start_time} Uhr, da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫"
             )
-            # Warten bis Duration abgelaufen
+
+            # Timer bis zur Entsperrung
             await asyncio.sleep(dur * 60)
-            # Entsperren
+
+            # Permissions zurücksetzen
             if isinstance(ch, discord.TextChannel):
                 await ch.set_permissions(role, send_messages=None)
             else:
                 await ch.set_permissions(role, connect=None, speak=None)
+
+            # Nachricht im entsperrten Kanal
             await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
+            # Rückmeldung im Command-Kanal
             await ctx.send(f"🔓 {ch.mention} wurde automatisch entsperrt.")
+
             lock_tasks.pop(ch.id, None)
 
+        # Task anlegen
         task = bot.loop.create_task(_scheduled_lock(channel, delay_until_lock, duration))
         lock_tasks[channel.id] = task
 
