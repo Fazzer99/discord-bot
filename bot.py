@@ -1,6 +1,7 @@
 import os
 import asyncio
 import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 import discord
@@ -61,8 +62,10 @@ async def lock(
     except ValueError:
         return await ctx.send("❌ Ungültiges Zeitformat. Bitte `HH:MM` im 24h-Format angeben.")
 
-    now = datetime.datetime.now()
-    target_dt = datetime.datetime.combine(now.date(), target_time)
+    # Jetzt in Berlin-Zeit
+    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    # Zielzeit ebenfalls in Berlin für heute
+    target_dt = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
     if target_dt <= now:
         target_dt += datetime.timedelta(days=1)
     delay_until_lock = (target_dt - now).total_seconds()
