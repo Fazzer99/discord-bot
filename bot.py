@@ -110,17 +110,15 @@ async def lock(
             # Timer bis zur Entsperrung
             await asyncio.sleep(dur * 60)
 
-            # Permissions zurücksetzen, Anzeige-Override entfernen
+            # Permissions zurücksetzen, Anzeige-Override beibehalten
             if isinstance(ch, discord.TextChannel):
                 await ch.set_permissions(
                     role,
-                    view_channel=None,
                     send_messages=None
                 )
             else:
                 await ch.set_permissions(
                     role,
-                    view_channel=None,
                     connect=None,
                     speak=None
                 )
@@ -162,17 +160,15 @@ async def unlock(
             lock_tasks[channel.id].cancel()
             lock_tasks.pop(channel.id, None)
 
-        # Permissions zurücksetzen, Anzeige-Override entfernen
+        # Permissions zurücksetzen, Anzeige-Override beibehalten
         if isinstance(channel, discord.TextChannel):
             await channel.set_permissions(
                 role,
-                view_channel=None,
                 send_messages=None
             )
         elif isinstance(channel, discord.VoiceChannel):
             await channel.set_permissions(
                 role,
-                view_channel=None,
                 connect=None,
                 speak=None
             )
