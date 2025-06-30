@@ -62,7 +62,7 @@ async def lock(
     except ValueError:
         return await ctx.send("❌ Ungültiges Zeitformat. Bitte `HH:MM` im 24h-Format angeben.")
 
-    # jetzige und Zielzeit in Berlin
+    # jetzt und Zielzeit in Berlin
     now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target_dt <= now:
@@ -72,32 +72,31 @@ async def lock(
     role = ctx.guild.default_role
 
     for channel in channels:
-        # vorhandenen Task abbrechen
+        # laufenden Task abbrechen
         if channel.id in lock_tasks:
             lock_tasks[channel.id].cancel()
 
-        # ORIGINALEN view_channel-Status speichern
+        # originalen view_channel-Status speichern
         ow = channel.overwrites_for(role)
         original_views[channel.id] = ow.view_channel
+        is_private = (ow.view_channel is False)
 
-        async def _scheduled_lock(ch: discord.abc.GuildChannel, delay_sec: float, dur: int):
+        async def _scheduled_lock(ch: discord.abc.GuildChannel, delay_sec: float, dur: int, private: bool):
             await asyncio.sleep(delay_sec)
 
-            # Sperre setzen, Unsichtbarkeit beibehalten
+            # Sperre setzen
             if isinstance(ch, discord.TextChannel):
-                await ch.set_permissions(
-                    role,
-                    view_channel=False,
-                    send_messages=False
-                )
+                if private:
+                    await ch.set_permissions(role, view_channel=False, send_messages=False)
+                else:
+                    await ch.set_permissions(role, send_messages=False)
             else:
-                await ch.set_permissions(
-                    role,
-                    view_channel=False,
-                    connect=False,
-                    speak=False
-                )
-                # und kicke alle, die noch drin sind
+                # VoiceChannel
+                if private:
+                    await ch.set_permissions(role, view_channel=False, connect=False, speak=False)
+                else:
+                    await ch.set_permissions(role, connect=False, speak=False)
+                # kicke alle drin
                 for m in ch.members:
                     try:
                         await m.move_to(None)
@@ -109,36 +108,32 @@ async def lock(
                 f"da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫"
             )
 
-            # Warte die Dauer
+            # Dauer abwarten
             await asyncio.sleep(dur * 60)
 
-            # Permissions zurücksetzen und original view_channel-Status wiederherstellen
+            # Entsperren
             orig_view = original_views.get(ch.id)
             if isinstance(ch, discord.TextChannel):
-                await ch.set_permissions(
-                    role,
-                    view_channel=orig_view,
-                    send_messages=None
-                )
+                if private:
+                    await ch.set_permissions(role, view_channel=orig_view, send_messages=None)
+                else:
+                    await ch.set_permissions(role, send_messages=None)
             else:
-                await ch.set_permissions(
-                    role,
-                    view_channel=orig_view,
-                    connect=None,
-                    speak=None
-                )
+                if private:
+                    await ch.set_permissions(role, view_channel=orig_view, connect=None, speak=None)
+                else:
+                    await ch.set_permissions(role, connect=None, speak=None)
 
             await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
             await ctx.send(f"🔓 {ch.mention} wurde automatisch entsperrt.")
-            # aufräumen
             lock_tasks.pop(ch.id, None)
             original_views.pop(ch.id, None)
 
         # Task anlegen
-        task = bot.loop.create_task(_scheduled_lock(channel, delay, duration))
+        task = bot.loop.create_task(_scheduled_lock(channel, delay, duration, is_private))
         lock_tasks[channel.id] = task
 
-        # sofortige Rückmeldung
+        # Bestätigung
         await ctx.send(
             f"⏰ {channel.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt."
         )
@@ -159,33 +154,29 @@ async def unlock(
     role = ctx.guild.default_role
 
     for channel in channels:
-        # laufenden Task abbrechen
         if channel.id in lock_tasks:
             lock_tasks[channel.id].cancel()
             lock_tasks.pop(channel.id, None)
 
-        # original view_channel-Status lesen (falls vorhanden)
+        # originalen view_channel-Status
         orig_view = original_views.pop(channel.id, None)
+        private = (orig_view is False)
 
-        # Permissions zurücksetzen und original view_channel beibehalten
+        # Entsperren
         if isinstance(channel, discord.TextChannel):
-            await channel.set_permissions(
-                role,
-                view_channel=orig_view,
-                send_messages=None
-            )
+            if private:
+                await channel.set_permissions(role, view_channel=orig_view, send_messages=None)
+            else:
+                await channel.set_permissions(role, send_messages=None)
         else:
-            await channel.set_permissions(
-                role,
-                view_channel=orig_view,
-                connect=None,
-                speak=None
-            )
+            if private:
+                await channel.set_permissions(role, view_channel=orig_view, connect=None, speak=None)
+            else:
+                await channel.set_permissions(role, connect=None, speak=None)
 
         await ctx.send(f"🔓 {channel.mention} entsperrt.")
 
 bot.run(TOKEN)
-
 
 
 
