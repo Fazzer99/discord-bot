@@ -80,12 +80,21 @@ async def lock(
             # Warte bis zur Startzeit
             await asyncio.sleep(delay)
 
-            # Sperre setzen
+            # Sperre setzen mit beibehaltener Unsichtbarkeit
             if isinstance(ch, discord.TextChannel):
-                await ch.set_permissions(role, send_messages=False)
+                await ch.set_permissions(
+                    role,
+                    view_channel=False,
+                    send_messages=False
+                )
             else:
-                # VoiceChannel: entziehe Connect & Speak
-                await ch.set_permissions(role, connect=False, speak=False)
+                # VoiceChannel: entziehe View, Connect & Speak
+                await ch.set_permissions(
+                    role,
+                    view_channel=False,
+                    connect=False,
+                    speak=False
+                )
                 # und kicke alle, die noch drin sind
                 for member in ch.members:
                     try:
@@ -101,11 +110,20 @@ async def lock(
             # Timer bis zur Entsperrung
             await asyncio.sleep(dur * 60)
 
-            # Permissions zurücksetzen
+            # Permissions zurücksetzen, Anzeige-Override entfernen
             if isinstance(ch, discord.TextChannel):
-                await ch.set_permissions(role, send_messages=None)
+                await ch.set_permissions(
+                    role,
+                    view_channel=None,
+                    send_messages=None
+                )
             else:
-                await ch.set_permissions(role, connect=None, speak=None)
+                await ch.set_permissions(
+                    role,
+                    view_channel=None,
+                    connect=None,
+                    speak=None
+                )
 
             # Nachricht im entsperrten Kanal
             await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
@@ -144,11 +162,20 @@ async def unlock(
             lock_tasks[channel.id].cancel()
             lock_tasks.pop(channel.id, None)
 
-        # Permissions zurücksetzen
+        # Permissions zurücksetzen, Anzeige-Override entfernen
         if isinstance(channel, discord.TextChannel):
-            await channel.set_permissions(role, send_messages=None)
+            await channel.set_permissions(
+                role,
+                view_channel=None,
+                send_messages=None
+            )
         elif isinstance(channel, discord.VoiceChannel):
-            await channel.set_permissions(role, connect=None, speak=None)
+            await channel.set_permissions(
+                role,
+                view_channel=None,
+                connect=None,
+                speak=None
+            )
         else:
             await ctx.send(f"⚠️ {channel.name} ist kein Text- oder Sprachkanal.")
             continue
