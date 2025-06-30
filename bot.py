@@ -26,6 +26,10 @@ lock_tasks: dict[int, asyncio.Task] = {}
 # Speichert originalen view_channel-Status: channel.id → Optional[bool]
 original_views: dict[int, bool | None] = {}
 
+# IDs der OG-Rollen, die im privaten Bereich ebenfalls den Voice-Zugang verlieren sollen
+OG_ROLE_ID = 1386723945583218749
+SENIOR_OG_ROLE_ID = 1387936511260889158
+
 # Error-Handler
 @bot.event
 async def on_command_error(ctx, error):
@@ -69,7 +73,9 @@ async def lock(
         target_dt += datetime.timedelta(days=1)
     delay = (target_dt - now).total_seconds()
 
-    role = ctx.guild.default_role
+    everyone = ctx.guild.default_role
+    og_role = ctx.guild.get_role(OG_ROLE_ID)
+    senior_og = ctx.guild.get_role(SENIOR_OG_ROLE_ID)
 
     for channel in channels:
         # laufenden Task abbrechen
@@ -77,25 +83,30 @@ async def lock(
             lock_tasks[channel.id].cancel()
 
         # originalen view_channel-Status speichern
-        ow = channel.overwrites_for(role)
+        ow = channel.overwrites_for(everyone)
         original_views[channel.id] = ow.view_channel
         is_private = (ow.view_channel is False)
 
-        async def _scheduled_lock(ch: discord.abc.GuildChannel, delay_sec: float, dur: int, private: bool):
+        async def _scheduled_lock(ch, delay_sec: float, dur: int, private: bool):
             await asyncio.sleep(delay_sec)
 
             # Sperre setzen
             if isinstance(ch, discord.TextChannel):
                 if private:
-                    await ch.set_permissions(role, view_channel=False, send_messages=False)
+                    await ch.set_permissions(everyone, view_channel=False, send_messages=False)
                 else:
-                    await ch.set_permissions(role, send_messages=False)
+                    await ch.set_permissions(everyone, send_messages=False)
             else:
-                # VoiceChannel
                 if private:
-                    await ch.set_permissions(role, view_channel=False, connect=False, speak=False)
+                    # Private Voice: auch OG-Rollen blockieren
+                    await ch.set_permissions(everyone, view_channel=False, connect=False, speak=False)
+                    if og_role:
+                        await ch.set_permissions(og_role, connect=False, speak=False)
+                    if senior_og:
+                        await ch.set_permissions(senior_og, connect=False, speak=False)
                 else:
-                    await ch.set_permissions(role, connect=False, speak=False)
+                    # Öffentliche Voice
+                    await ch.set_permissions(everyone, connect=False, speak=False)
                 # kicke alle drin
                 for m in ch.members:
                     try:
@@ -108,21 +119,26 @@ async def lock(
                 f"da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫"
             )
 
-            # Dauer abwarten
+            # Warte die Dauer
             await asyncio.sleep(dur * 60)
 
-            # Entsperren
+            # Entsperren & ursprüngliche Sichtbarkeit wiederherstellen
             orig_view = original_views.get(ch.id)
             if isinstance(ch, discord.TextChannel):
                 if private:
-                    await ch.set_permissions(role, view_channel=orig_view, send_messages=None)
+                    await ch.set_permissions(everyone, view_channel=orig_view, send_messages=None)
                 else:
-                    await ch.set_permissions(role, send_messages=None)
+                    await ch.set_permissions(everyone, send_messages=None)
             else:
                 if private:
-                    await ch.set_permissions(role, view_channel=orig_view, connect=None, speak=None)
+                    # Private Voice: OG-Rollen wieder freigeben
+                    await ch.set_permissions(everyone, view_channel=orig_view, connect=None, speak=None)
+                    if og_role:
+                        await ch.set_permissions(og_role, connect=None, speak=None)
+                    if senior_og:
+                        await ch.set_permissions(senior_og, connect=None, speak=None)
                 else:
-                    await ch.set_permissions(role, connect=None, speak=None)
+                    await ch.set_permissions(everyone, connect=None, speak=None)
 
             await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
             await ctx.send(f"🔓 {ch.mention} wurde automatisch entsperrt.")
@@ -133,7 +149,7 @@ async def lock(
         task = bot.loop.create_task(_scheduled_lock(channel, delay, duration, is_private))
         lock_tasks[channel.id] = task
 
-        # Bestätigung
+        # sofortige Rückmeldung
         await ctx.send(
             f"⏰ {channel.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt."
         )
@@ -151,7 +167,9 @@ async def unlock(
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
 
-    role = ctx.guild.default_role
+    everyone = ctx.guild.default_role
+    og_role = ctx.guild.get_role(OG_ROLE_ID)
+    senior_og = ctx.guild.get_role(SENIOR_OG_ROLE_ID)
 
     for channel in channels:
         if channel.id in lock_tasks:
@@ -165,14 +183,18 @@ async def unlock(
         # Entsperren
         if isinstance(channel, discord.TextChannel):
             if private:
-                await channel.set_permissions(role, view_channel=orig_view, send_messages=None)
+                await channel.set_permissions(everyone, view_channel=orig_view, send_messages=None)
             else:
-                await channel.set_permissions(role, send_messages=None)
+                await channel.set_permissions(everyone, send_messages=None)
         else:
             if private:
-                await channel.set_permissions(role, view_channel=orig_view, connect=None, speak=None)
+                await channel.set_permissions(everyone, view_channel=orig_view, connect=None, speak=None)
+                if og_role:
+                    await channel.set_permissions(og_role, connect=None, speak=None)
+                if senior_og:
+                    await channel.set_permissions(senior_og, connect=None, speak=None)
             else:
-                await channel.set_permissions(role, connect=None, speak=None)
+                await channel.set_permissions(everyone, connect=None, speak=None)
 
         await ctx.send(f"🔓 {channel.mention} entsperrt.")
 
