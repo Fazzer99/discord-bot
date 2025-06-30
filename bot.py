@@ -26,7 +26,7 @@ lock_tasks: dict[int, asyncio.Task] = {}
 # Speichert originalen view_channel-Status: channel.id → Optional[bool]
 original_views: dict[int, bool | None] = {}
 
-# IDs der OG-Rollen, die im privaten Bereich ebenfalls den Voice-Zugang verlieren sollen
+# IDs der OG-Rollen
 OG_ROLE_ID = 1386723945583218749
 SENIOR_OG_ROLE_ID = 1387936511260889158
 
@@ -66,7 +66,6 @@ async def lock(
     except ValueError:
         return await ctx.send("❌ Ungültiges Zeitformat. Bitte `HH:MM` im 24h-Format angeben.")
 
-    # jetzt und Zielzeit in Berlin
     now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target_dt <= now:
@@ -78,7 +77,6 @@ async def lock(
     senior_og = ctx.guild.get_role(SENIOR_OG_ROLE_ID)
 
     for channel in channels:
-        # laufenden Task abbrechen
         if channel.id in lock_tasks:
             lock_tasks[channel.id].cancel()
 
@@ -90,7 +88,6 @@ async def lock(
         async def _scheduled_lock(ch, delay_sec: float, dur: int, private: bool):
             await asyncio.sleep(delay_sec)
 
-            # Sperre setzen
             if isinstance(ch, discord.TextChannel):
                 if private:
                     await ch.set_permissions(everyone, view_channel=False, send_messages=False)
@@ -98,16 +95,16 @@ async def lock(
                     await ch.set_permissions(everyone, send_messages=False)
             else:
                 if private:
-                    # Private Voice: auch OG-Rollen blockieren
+                    # private: everyone unsichtbar + no connect/speak
                     await ch.set_permissions(everyone, view_channel=False, connect=False, speak=False)
+                    # OG & Senior OG: nur connect/speak entziehen, Sichtbarkeit per ursprünglichem Setting
                     if og_role:
                         await ch.set_permissions(og_role, connect=False, speak=False)
                     if senior_og:
                         await ch.set_permissions(senior_og, connect=False, speak=False)
                 else:
-                    # Öffentliche Voice
+                    # public: alle sehen, aber no connect/speak
                     await ch.set_permissions(everyone, connect=False, speak=False)
-                # kicke alle drin
                 for m in ch.members:
                     try:
                         await m.move_to(None)
@@ -119,10 +116,8 @@ async def lock(
                 f"da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫"
             )
 
-            # Warte die Dauer
             await asyncio.sleep(dur * 60)
 
-            # Entsperren & ursprüngliche Sichtbarkeit wiederherstellen
             orig_view = original_views.get(ch.id)
             if isinstance(ch, discord.TextChannel):
                 if private:
@@ -131,7 +126,6 @@ async def lock(
                     await ch.set_permissions(everyone, send_messages=None)
             else:
                 if private:
-                    # Private Voice: OG-Rollen wieder freigeben
                     await ch.set_permissions(everyone, view_channel=orig_view, connect=None, speak=None)
                     if og_role:
                         await ch.set_permissions(og_role, connect=None, speak=None)
@@ -145,11 +139,9 @@ async def lock(
             lock_tasks.pop(ch.id, None)
             original_views.pop(ch.id, None)
 
-        # Task anlegen
         task = bot.loop.create_task(_scheduled_lock(channel, delay, duration, is_private))
         lock_tasks[channel.id] = task
 
-        # sofortige Rückmeldung
         await ctx.send(
             f"⏰ {channel.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt."
         )
@@ -176,11 +168,9 @@ async def unlock(
             lock_tasks[channel.id].cancel()
             lock_tasks.pop(channel.id, None)
 
-        # originalen view_channel-Status
         orig_view = original_views.pop(channel.id, None)
         private = (orig_view is False)
 
-        # Entsperren
         if isinstance(channel, discord.TextChannel):
             if private:
                 await channel.set_permissions(everyone, view_channel=orig_view, send_messages=None)
