@@ -114,11 +114,13 @@ async def lock(
             if isinstance(ch, discord.TextChannel):
                 await ch.set_permissions(
                     role,
+                    view_channel=False,
                     send_messages=None
                 )
             else:
                 await ch.set_permissions(
                     role,
+                    view_channel=False,
                     connect=None,
                     speak=None
                 )
@@ -164,11 +166,13 @@ async def unlock(
         if isinstance(channel, discord.TextChannel):
             await channel.set_permissions(
                 role,
+                view_channel=False,
                 send_messages=None
             )
         elif isinstance(channel, discord.VoiceChannel):
             await channel.set_permissions(
                 role,
+                view_channel=False,
                 connect=None,
                 speak=None
             )
