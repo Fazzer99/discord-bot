@@ -116,7 +116,7 @@ async def lock(
                     try: await m.move_to(None)
                     except: pass
 
-            await channel.send(f"🔒 Kanal automatisch gesperrt um {start_time} Uhr – für {dur} Minuten nicht verfügbar 🚫")
+            await channel.send(f"🔒 Kanal automatisch gesperrt um {start_time} Uhr, da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫")
 
             # Warte Dauer
             await asyncio.sleep(dur * 60)
