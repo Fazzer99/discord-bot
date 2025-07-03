@@ -1,4 +1,4 @@
-import os
+import os 
 import asyncio
 import datetime
 from zoneinfo import ZoneInfo
@@ -44,6 +44,8 @@ async def on_command_error(ctx, error):
         )
     elif isinstance(error, MissingPermissions):
         await ctx.send("❌ Du benötigst `Manage Channels`-Rechte.")
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ Du hast nicht die nötigen Rechte, um diesen Befehl auszuführen.")
     else:
         raise error
 
