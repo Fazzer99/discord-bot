@@ -29,6 +29,9 @@ role_views: dict[int, dict[str, bool | None]] = {}
 # IDs der OG-Rollen
 OG_ROLE_ID = 1386723945583218749
 SENIOR_OG_ROLE_ID = 1387936511260889158
+# IDs der Rollen mit Bot-Rechten
+ADMIN_ROLE_ID = 1386726424441786448
+MOD_ROLE_ID   = 1386723766041706506
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -45,7 +48,10 @@ async def on_command_error(ctx, error):
         raise error
 
 @bot.command(name="lock")
-@commands.has_permissions(manage_channels=True)
+@commands.check_any(
+    commands.has_permissions(manage_channels=True),
+    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
+)
 async def lock(
     ctx,
     channels: Greedy[discord.abc.GuildChannel],
@@ -151,10 +157,13 @@ async def lock(
         await ctx.send(f"⏰ {ch.mention} wird um {start_time} Uhr für {duration} Min. gesperrt.")
 
 @bot.command(name="unlock")
-@commands.has_permissions(manage_channels=True)
+@commands.check_any(
+    commands.has_permissions(manage_channels=True),
+    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
+)
 async def unlock(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
-    Hebt Sperre sofort auf.
+    Hebbt Sperre sofort auf.
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
