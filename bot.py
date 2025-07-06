@@ -39,6 +39,7 @@ NEWBIE_ROLE_ID        = 1388900287468535818
 WELCOME_CHANNEL_ID    = 1386788177062395946
 RULES_CHANNEL_ID      = 1386721701450219592
 ANNOUNCEMENTS_CHANNEL_ID = 1386721701450219594
+TICKET_ID = 1390380110645035030
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -220,11 +221,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 f"Willkommen auf **{after.guild.name}** 👋\n"
                 f"Mach’s dir bequem – wir freuen uns, dass du hier bist. 😄\n\n"
                 f"Bitte lies unsere Regeln in <#{RULES_CHANNEL_ID}> und schau in <#{ANNOUNCEMENTS_CHANNEL_ID}> für Neuigkeiten.\n\n"
-                f"Bei Fragen helfen dir unsere Mods jederzeit gerne weiter!\n— Deine Rina🐥"
+                f"Bei Fragen helfen dir unsere Mods jederzeit gerne weiter! Öffne hierfür hier ein Ticket: <#{TICKET_ID}>\n— Deine Rina🐥"
             )
 
 bot.run(TOKEN)
-
-
-
-# python bot.py
