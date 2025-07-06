@@ -217,9 +217,10 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         ch = after.guild.get_channel(WELCOME_CHANNEL_ID)
         if ch:
             await ch.send(
-                f"📣 @everyone Ein neues Mitglied ist da: {after.mention} 🎉\n"
+                f"📣 @everyone Ein neues Mitglied ist da: {after.mention} 🎉\n\n"
                 f"Willkommen auf **{after.guild.name}** 👋\n"
                 f"Mach’s dir bequem – wir freuen uns, dass du hier bist. 😄\n\n"
+                f"🔓 Sammle XP durch Aktivität im Chat und steigere dein Level!"
                 f"Bitte lies unsere Regeln in <#{RULES_CHANNEL_ID}> und schau in <#{ANNOUNCEMENTS_CHANNEL_ID}> für Neuigkeiten.\n\n"
                 f"Bei Fragen helfen dir unsere Mods jederzeit gerne weiter! Öffne hierfür hier ein Ticket: <#{TICKET_ID}>\n— Deine Rina🐥"
             )
