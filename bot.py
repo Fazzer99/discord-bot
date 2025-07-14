@@ -249,7 +249,7 @@ async def on_member_remove(member: discord.Member):
 
     # 2. Ban-Check (jetzt korrekt)
     try:
-        bans = await guild.fetch_bans()
+        bans = await guild.fetch_ban()
         if any(b.user.id == member.id for b in bans):
             return
     except discord.Forbidden:
