@@ -225,4 +225,26 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 f"Bei Fragen helfen dir unsere Mods jederzeit gerne weiter! Öffne hierfür hier ein Ticket: <#{TICKET_ID}>\n— Deine Rina🐥"
             )
 
+# --- Abschieds-Funktion: wenn Mitglieder freiwillig verlassen ---
+@bot.event
+async def on_member_remove(member: discord.Member):
+    LEAVE_CHANNEL_ID = 1394309783200464967
+    guild = member.guild
+
+    # 1. Prüfen, ob der User gerade gekickt wurde
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+        if entry.target.id == member.id and (datetime.datetime.now(tz=ZoneInfo("Europe/Berlin")) - entry.created_at).total_seconds() < 5:
+            return
+
+    # 2. Prüfen, ob der User gebannt wurde
+    bans = await guild.bans()
+    if any(ban_entry.user.id == member.id for ban_entry in bans):
+        return
+
+    # 3. Freiwilliges Verlassen → Abschied posten
+    ch = guild.get_channel(LEAVE_CHANNEL_ID)
+    if ch:
+        await ch.send(f"😢 {member.mention} hat den Server verlassen. @everyone werden dich vermissen! 💔")
+
+# Starte den Bot
 bot.run(TOKEN)
