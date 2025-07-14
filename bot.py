@@ -232,39 +232,39 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     guild = member.guild
-
-    # 1. Versuch, den letzten Kick-Eintrag zu lesen
+    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     kicked = False
+
+    # 1. Kick-Check (View Audit Log nötig)
     try:
         async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
-            if entry.target.id == member.id and \
-               (datetime.datetime.now(tz=ZoneInfo("Europe/Berlin")) - entry.created_at).total_seconds() < 5:
+            delta = (now - entry.created_at).total_seconds()
+            if entry.target.id == member.id and delta < 5:
                 kicked = True
-                break
+            break
     except discord.Forbidden:
-        # Bot darf Audit-Log nicht lesen → assume freiwillig
+        # kein Audit-Log-Recht → nehmen wir an, es war kein Kick
         kicked = False
 
     if kicked:
-        return  # war ein Kick, keine Abschieds-Nachricht
+        return
 
-    # 2. Prüfen, ob gebannt wurde
+    # 2. Ban-Check (Ban-Leserecht nötig)
     try:
         bans = await guild.bans()
         if any(b.user.id == member.id for b in bans):
             return
     except discord.Forbidden:
-        # kein Ban-Log-Recht? Einfach weiterfahren
+        # kein Ban-Leserecht → weitermachen
         pass
 
-    # 3. Freiwilliges Verlassen → Abschieds-Nachricht
-    LEAVE_CHANNEL_ID = 1394309783200464967
+    # 3. Freiwilliges Verlassen → Nachricht senden
     ch = guild.get_channel(LEAVE_CHANNEL_ID)
     if ch:
         try:
             await ch.send(f"😢 {member.mention} hat den Server verlassen. Wir werden dich vermissen! 💔")
         except discord.Forbidden:
-            print(f"❗️ Konnte in Kanal {LEAVE_CHANNEL_ID} nicht schreiben.")
+            print(f"Kann in Kanal {LEAVE_CHANNEL_ID} nicht schreiben.")
 
 # Starte den Bot
 bot.run(TOKEN)
