@@ -41,6 +41,9 @@ RULES_CHANNEL_ID      = 1386721701450219592
 ANNOUNCEMENTS_CHANNEL_ID = 1386721701450219594
 TICKET_ID = 1390380110645035030
 
+# IDs für Abschieds-Funktion
+LEAVE_CHANNEL_ID = 1394309783200464967
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, MissingRequiredArgument):
@@ -228,7 +231,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 # --- Abschieds-Funktion: wenn Mitglieder freiwillig verlassen ---
 @bot.event
 async def on_member_remove(member: discord.Member):
-    LEAVE_CHANNEL_ID = 1394309783200464967
     guild = member.guild
 
     # 1. Prüfen, ob der User gerade gekickt wurde
