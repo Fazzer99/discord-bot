@@ -235,30 +235,27 @@ async def on_member_remove(member: discord.Member):
     now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     kicked = False
 
-    # 1. Kick-Check (View Audit Log nötig)
+    # 1. Kick-Check
     try:
         async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
-            delta = (now - entry.created_at).total_seconds()
-            if entry.target.id == member.id and delta < 5:
+            if entry.target.id == member.id and (now - entry.created_at).total_seconds() < 5:
                 kicked = True
             break
     except discord.Forbidden:
-        # kein Audit-Log-Recht → nehmen wir an, es war kein Kick
         kicked = False
 
     if kicked:
         return
 
-    # 2. Ban-Check (Ban-Leserecht nötig)
+    # 2. Ban-Check (jetzt korrekt)
     try:
-        bans = await guild.bans()
+        bans = await guild.fetch_bans()
         if any(b.user.id == member.id for b in bans):
             return
     except discord.Forbidden:
-        # kein Ban-Leserecht → weitermachen
         pass
 
-    # 3. Freiwilliges Verlassen → Nachricht senden
+    # 3. Freiwilliges Verlassen → Abschied posten
     ch = guild.get_channel(LEAVE_CHANNEL_ID)
     if ch:
         try:
