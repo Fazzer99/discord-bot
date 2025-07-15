@@ -233,9 +233,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_member_remove(member: discord.Member):
     guild = member.guild
     now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
-    kicked = False
 
     # 1. Kick-Check
+    kicked = False
     try:
         async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
             if entry.target.id == member.id and (now - entry.created_at).total_seconds() < 5:
@@ -243,15 +243,15 @@ async def on_member_remove(member: discord.Member):
             break
     except discord.Forbidden:
         kicked = False
-
     if kicked:
         return
 
-    # 2. Ban-Check (jetzt korrekt)
+    # 2. Ban-Check über fetch_ban (mit member)
     try:
-        bans = await guild.fetch_ban()
-        if any(b.user.id == member.id for b in bans):
-            return
+        await guild.fetch_ban(member)
+        return
+    except discord.NotFound:
+        pass
     except discord.Forbidden:
         pass
 
