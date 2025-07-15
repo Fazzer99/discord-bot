@@ -259,7 +259,7 @@ async def on_member_remove(member: discord.Member):
     ch = guild.get_channel(LEAVE_CHANNEL_ID)
     if ch:
         try:
-            await ch.send(f"😢 {member.mention} hat den Server verlassen. Wir werden dich vermissen! 💔")
+            await ch.send(f"😢 {member.mention} hat den Server verlassen. @everyone werden dich vermissen! 💔")
         except discord.Forbidden:
             print(f"Kann in Kanal {LEAVE_CHANNEL_ID} nicht schreiben.")
 
