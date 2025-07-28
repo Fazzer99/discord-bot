@@ -318,20 +318,28 @@ async def cleanup(
                         warn_text = f"in {int(warn_minutes//60)} Stunde(n)"
                     else:
                         warn_text = f"in {int(warn_minutes)} Minute(n)"
-                    await channel.send(f"⚠️ Achtung: In {warn_text} werden alle Nachrichten gelöscht. "
-                                       "Sichert bitte wichtige Infos!")
+                    await channel.send(
+                        f"⚠️ Achtung: {warn_text} werden gleich alle Nachrichten gelöscht. "
+                        "Sichert bitte wichtige Infos!"
+                    )
                     # dann restliche Zeit
                     await asyncio.sleep(interval_s - pre)
                 else:
                     # keine Vorwarnung
                     await asyncio.sleep(interval_s)
 
-                # cleanup
+                # cleanup in BATCHES à 100
                 try:
-                    await channel.purge(limit=None)
+                    while True:
+                        msgs = [m async for m in channel.history(limit=100)]
+                        if not msgs:
+                            break
+                        await channel.delete_messages(msgs)
                     await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
                 except discord.Forbidden:
                     print(f"❗️ Kein Recht zum Löschen in {channel.id}")
+                except Exception as e:
+                    print(f"❗️ Fehler beim Bulk-Löschen in {channel.id}: {e}")
 
         # Task anlegen
         task = bot.loop.create_task(_loop_cleanup(ch, interval))
