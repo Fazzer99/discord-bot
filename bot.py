@@ -263,5 +263,102 @@ async def on_member_remove(member: discord.Member):
         except discord.Forbidden:
             print(f"Kann in Kanal {LEAVE_CHANNEL_ID} nicht schreiben.")
 
+# --- Chat-Cleanup-Funktion ---
+cleanup_tasks: dict[int, asyncio.Task] = {}
+
+def _compute_pre_notify(interval: float) -> float | None:
+    # gibt zurück, nach wie vielen Sekunden wir warnen
+    if interval >= 3600:
+        return interval - 3600
+    if interval >= 300:
+        return interval - 300
+    return None
+
+@bot.command(name="cleanup")
+@commands.check_any(
+    commands.has_permissions(manage_messages=True),
+    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
+)
+async def cleanup(
+    ctx,
+    channels: Greedy[discord.abc.GuildChannel],
+    days: int,
+    minutes: int
+):
+    """
+    Startet eine wiederkehrende Löschung aller Nachrichten in den angegebenen Kanälen.
+    Usage: !cleanup <#Kanal…> <Tage> <Minuten>
+    Beispiel: !cleanup #general 0 10    → alle 10 Minuten
+              !cleanup #logs 1 0       → alle 24 Stunden
+    """
+    if not channels:
+        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+    interval = days * 86400 + minutes * 60
+    if interval <= 0:
+        return await ctx.send("❌ Ungültige Intervalle – bitte Tage oder Minuten > 0 angeben.")
+
+    # Rückmeldung im Command-Kanal
+    await ctx.send(f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} "
+                   f"werden alle {days} Tage und {minutes} Minuten gelöscht.")
+
+    for ch in channels:
+        # bestehenden Task abbrechen
+        if ch.id in cleanup_tasks:
+            cleanup_tasks[ch.id].cancel()
+
+        async def _loop_cleanup(channel: discord.TextChannel, interval_s: float):
+            pre = _compute_pre_notify(interval_s)
+            while True:
+                # Vorwarnung
+                if pre is not None:
+                    await asyncio.sleep(pre)
+                    warn_minutes = (interval_s - pre) / 60
+                    # Falls ≥60 Min → in Stunden ausgeben
+                    if warn_minutes >= 60:
+                        warn_text = f"in {int(warn_minutes//60)} Stunde(n)"
+                    else:
+                        warn_text = f"in {int(warn_minutes)} Minute(n)"
+                    await channel.send(f"⚠️ Achtung: In {warn_text} werden alle Nachrichten gelöscht. "
+                                       "Sichert bitte wichtige Infos!")
+                    # dann restliche Zeit
+                    await asyncio.sleep(interval_s - pre)
+                else:
+                    # keine Vorwarnung
+                    await asyncio.sleep(interval_s)
+
+                # cleanup
+                try:
+                    await channel.purge(limit=None)
+                    await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+                except discord.Forbidden:
+                    print(f"❗️ Kein Recht zum Löschen in {channel.id}")
+
+        # Task anlegen
+        task = bot.loop.create_task(_loop_cleanup(ch, interval))
+        cleanup_tasks[ch.id] = task
+
+@bot.command(name="cleanup_stop")
+@commands.check_any(
+    commands.has_permissions(manage_messages=True),
+    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
+)
+async def cleanup_stop(
+    ctx,
+    channels: Greedy[discord.abc.GuildChannel]
+):
+    """
+    Stoppt die automatische Löschung in den angegebenen Kanälen.
+    Usage: !cleanup_stop <#Kanal…>
+    """
+    if not channels:
+        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+    for ch in channels:
+        task = cleanup_tasks.pop(ch.id, None)
+        if task:
+            task.cancel()
+            await ctx.send(f"🛑 Automatische Löschung in {ch.mention} gestoppt.")
+        else:
+            await ctx.send(f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
+
 # Starte den Bot
 bot.run(TOKEN)
