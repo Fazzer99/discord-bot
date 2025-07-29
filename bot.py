@@ -279,6 +279,29 @@ def age_seconds(msg: discord.Message) -> float:
     now = datetime.datetime.now(tz=msg.created_at.tzinfo)
     return (now - msg.created_at).total_seconds()
 
+async def _purge_all(channel: discord.TextChannel):
+    """Löscht alle Nachrichten – bulk für <14d, einzeln älter."""
+    cutoff = 14 * 24 * 3600
+    while True:
+        msgs = [m async for m in channel.history(limit=100)]
+        if not msgs:
+            break
+        # bulk jüngere Nachrichten
+        to_bulk = [m for m in msgs if age_seconds(m) < cutoff]
+        if to_bulk:
+            try:
+                await channel.delete_messages(to_bulk)
+            except Exception as e:
+                print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
+        # alte Nachrichten einzeln
+        old = [m for m in msgs if age_seconds(m) >= cutoff]
+        for m in old:
+            try:
+                await m.delete()
+                await asyncio.sleep(0.2)
+            except:
+                pass
+
 @bot.command(name="cleanup")
 @commands.check_any(
     commands.has_permissions(manage_messages=True),
@@ -308,10 +331,18 @@ async def cleanup(
     )
 
     for ch in channels:
+        # alten Task abbrechen
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
 
         async def _loop_cleanup(channel: discord.TextChannel, interval_s: float):
+            # sofortige Erst-Löschung
+            await _purge_all(channel)
+            try:
+                await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+            except discord.Forbidden:
+                pass
+
             pre = _compute_pre_notify(interval_s)
             while True:
                 # Vorwarnung
@@ -319,46 +350,21 @@ async def cleanup(
                     await asyncio.sleep(pre)
                     warn_minutes = (interval_s - pre) / 60
                     if warn_minutes >= 60:
-                        warn_text = f"in {int(warn_minutes // 60)} Stunde(n)"
+                        wt = int(warn_minutes // 60)
+                        await channel.send(f"⚠️ Achtung: In {wt} Stunde(n) werden gleich alle Nachrichten gelöscht.")
                     else:
-                        warn_text = f"in {int(warn_minutes)} Minute(n)"
-                    await channel.send(
-                        f"⚠️ Achtung: {warn_text} werden gleich alle Nachrichten gelöscht. "
-                        "Sichert bitte wichtige Infos!"
-                    )
+                        wm = int(warn_minutes)
+                        await channel.send(f"⚠️ Achtung: In {wm} Minute(n) werden gleich alle Nachrichten gelöscht.")
                     await asyncio.sleep(interval_s - pre)
                 else:
                     await asyncio.sleep(interval_s)
 
-                # Nachrichten sammeln (bis zu 200)
-                messages = [m async for m in channel.history(limit=200)]
-                if not messages:
+                # wieder komplette Löschung
+                await _purge_all(channel)
+                try:
                     await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
-                    await asyncio.sleep(interval_s)
-                    continue
-
-                # 1) Bulk deletion für Nachrichten < 14 Tage in Batches à 100
-                cutoff = 14 * 24 * 3600
-                to_bulk = [m for m in messages if age_seconds(m) < cutoff]
-                if to_bulk:
-                    try:
-                        for i in range(0, len(to_bulk), 100):
-                            batch = to_bulk[i:i+100]
-                            await channel.delete_messages(batch)
-                    except Exception as e:
-                        print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
-
-                # 2) Einzel-Löschung für ältere Nachrichten
-                old = [m for m in messages if age_seconds(m) >= cutoff]
-                for m in old:
-                    try:
-                        await m.delete()
-                        await asyncio.sleep(0.2)
-                    except Exception:
-                        pass
-
-                await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
-                await asyncio.sleep(interval_s)
+                except discord.Forbidden:
+                    pass
 
         task = bot.loop.create_task(_loop_cleanup(ch, interval))
         cleanup_tasks[ch.id] = task
