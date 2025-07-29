@@ -275,7 +275,6 @@ def _compute_pre_notify(interval: float) -> float | None:
     return None
 
 def age_seconds(msg: discord.Message) -> float:
-    # Alter einer Nachricht in Sekunden
     now = datetime.datetime.now(tz=msg.created_at.tzinfo)
     return (now - msg.created_at).total_seconds()
 
@@ -286,21 +285,26 @@ async def _purge_all(channel: discord.TextChannel):
         msgs = [m async for m in channel.history(limit=100)]
         if not msgs:
             break
-        # bulk jüngere Nachrichten
+
+        # Bulk löschen (< 14 Tage) in 100er Batches
         to_bulk = [m for m in msgs if age_seconds(m) < cutoff]
-        if to_bulk:
+        for i in range(0, len(to_bulk), 100):
+            batch = to_bulk[i:i+100]
             try:
-                await channel.delete_messages(to_bulk)
-            except Exception as e:
-                print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
-        # alte Nachrichten einzeln
+                await channel.delete_messages(batch)
+            except discord.HTTPException as e:
+                if getattr(e, "code", None) != 50034:
+                    print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
+            await asyncio.sleep(0)  # erlaubt CancelledError zu greifen
+
+        # Ältere Nachrichten einzeln löschen
         old = [m for m in msgs if age_seconds(m) >= cutoff]
         for m in old:
             try:
                 await m.delete()
-                await asyncio.sleep(0.2)
-            except:
+            except discord.HTTPException:
                 pass
+            await asyncio.sleep(0)  # erlaubt CancelledError zu greifen
 
 @bot.command(name="cleanup")
 @commands.check_any(
@@ -331,7 +335,6 @@ async def cleanup(
     )
 
     for ch in channels:
-        # alten Task abbrechen
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
 
@@ -359,7 +362,7 @@ async def cleanup(
                 else:
                     await asyncio.sleep(interval_s)
 
-                # wieder komplette Löschung
+                # nächste Löschrunde
                 await _purge_all(channel)
                 try:
                     await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
