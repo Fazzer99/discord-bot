@@ -267,7 +267,6 @@ async def on_member_remove(member: discord.Member):
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
 def _compute_pre_notify(interval: float) -> float | None:
-    # gibt zurück, nach wie vielen Sekunden wir warnen
     if interval >= 3600:
         return interval - 3600
     if interval >= 300:
@@ -286,25 +285,21 @@ async def _purge_all(channel: discord.TextChannel):
         if not msgs:
             break
 
-        # Bulk löschen (< 14 Tage) in 100er Batches
+        # 1) Bulk löschen (<14 Tage) in 100er-Batches
         to_bulk = [m for m in msgs if age_seconds(m) < cutoff]
         for i in range(0, len(to_bulk), 100):
             batch = to_bulk[i:i+100]
-            try:
-                await channel.delete_messages(batch)
-            except discord.HTTPException as e:
-                if getattr(e, "code", None) != 50034:
-                    print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
-            await asyncio.sleep(3)  # erlaubt CancelledError zu greifen
+            # Bulk-Delete ohne Error-Handling
+            await channel.delete_messages(batch)
+            # 3 Sekunden Pause nach jedem Batch
+            await asyncio.sleep(3)
 
-        # Ältere Nachrichten einzeln löschen
+        # 2) Einzel-Löschung für ältere Nachrichten
         old = [m for m in msgs if age_seconds(m) >= cutoff]
         for m in old:
-            try:
-                await m.delete()
-            except discord.HTTPException:
-                pass
-            await asyncio.sleep(1)  # erlaubt CancelledError zu greifen
+            await m.delete()
+            # 1 Sekunde Pause zwischen Einzel-Deletes
+            await asyncio.sleep(1)
 
 @bot.command(name="cleanup")
 @commands.check_any(
