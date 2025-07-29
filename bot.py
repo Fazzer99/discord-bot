@@ -267,6 +267,7 @@ async def on_member_remove(member: discord.Member):
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
 def _compute_pre_notify(interval: float) -> float | None:
+    # gibt zurück, nach wie vielen Sekunden wir warnen
     if interval >= 3600:
         return interval - 3600
     if interval >= 300:
@@ -274,32 +275,30 @@ def _compute_pre_notify(interval: float) -> float | None:
     return None
 
 def age_seconds(msg: discord.Message) -> float:
+    # Alter einer Nachricht in Sekunden
     now = datetime.datetime.now(tz=msg.created_at.tzinfo)
     return (now - msg.created_at).total_seconds()
 
 async def _purge_all(channel: discord.TextChannel):
-    """Löscht alle Nachrichten – bulk für <14d, einzeln älter."""
+    """Löscht alle Nachrichten – bulk für <14 Tage, einzeln älter."""
     cutoff = 14 * 24 * 3600
     while True:
         msgs = [m async for m in channel.history(limit=100)]
         if not msgs:
             break
 
-        # 1) Bulk löschen (<14 Tage) in 100er-Batches
+        # 1) Bulk löschen (<14 Tage) in 100er-Batches
         to_bulk = [m for m in msgs if age_seconds(m) < cutoff]
         for i in range(0, len(to_bulk), 100):
             batch = to_bulk[i:i+100]
-            # Bulk-Delete ohne Error-Handling
             await channel.delete_messages(batch)
-            # 3 Sekunden Pause nach jedem Batch
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)  # Pause nach jedem Bulk‑Batch
 
-        # 2) Einzel-Löschung für ältere Nachrichten
+        # 2) Einzel‑Löschung für ältere Nachrichten (ohne Exception-Fang)
         old = [m for m in msgs if age_seconds(m) >= cutoff]
         for m in old:
             await m.delete()
-            # 1 Sekunde Pause zwischen Einzel-Deletes
-            await asyncio.sleep(1)
+            await asyncio.sleep(1)  # Pause zwischen Einzel-Deletes
 
 @bot.command(name="cleanup")
 @commands.check_any(
@@ -330,6 +329,7 @@ async def cleanup(
     )
 
     for ch in channels:
+        # vorhandenen Task abbrechen
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
 
