@@ -322,7 +322,10 @@ async def cleanup(
                         warn_text = f"in {int(warn_minutes // 60)} Stunde(n)"
                     else:
                         warn_text = f"in {int(warn_minutes)} Minute(n)"
-                    await channel.send(f"⚠️ Achtung: {warn_text} werden gleich alle Nachrichten gelöscht. Sichert bitte wichtige Infos!")
+                    await channel.send(
+                        f"⚠️ Achtung: {warn_text} werden gleich alle Nachrichten gelöscht. "
+                        "Sichert bitte wichtige Infos!"
+                    )
                     await asyncio.sleep(interval_s - pre)
                 else:
                     await asyncio.sleep(interval_s)
@@ -334,12 +337,14 @@ async def cleanup(
                     await asyncio.sleep(interval_s)
                     continue
 
-                # 1) Bulk deletion für Nachrichten < 14 Tage
+                # 1) Bulk deletion für Nachrichten < 14 Tage in Batches à 100
                 cutoff = 14 * 24 * 3600
                 to_bulk = [m for m in messages if age_seconds(m) < cutoff]
                 if to_bulk:
                     try:
-                        await channel.delete_messages(to_bulk)
+                        for i in range(0, len(to_bulk), 100):
+                            batch = to_bulk[i:i+100]
+                            await channel.delete_messages(batch)
                     except Exception as e:
                         print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
 
