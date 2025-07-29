@@ -295,7 +295,7 @@ async def _purge_all(channel: discord.TextChannel):
             except discord.HTTPException as e:
                 if getattr(e, "code", None) != 50034:
                     print(f"❗️ Bulk-Fehler in {channel.id}: {e}")
-            await asyncio.sleep(0)  # erlaubt CancelledError zu greifen
+            await asyncio.sleep(3)  # erlaubt CancelledError zu greifen
 
         # Ältere Nachrichten einzeln löschen
         old = [m for m in msgs if age_seconds(m) >= cutoff]
@@ -304,7 +304,7 @@ async def _purge_all(channel: discord.TextChannel):
                 await m.delete()
             except discord.HTTPException:
                 pass
-            await asyncio.sleep(0)  # erlaubt CancelledError zu greifen
+            await asyncio.sleep(1)  # erlaubt CancelledError zu greifen
 
 @bot.command(name="cleanup")
 @commands.check_any(
