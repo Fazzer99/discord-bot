@@ -384,79 +384,55 @@ async def on_guild_join(guild: discord.Guild):
         (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages),
         None
     )
-    if target is None:
+    if not target:
         return
 
-    info_text = (
+    part1 = (
         f"👋 **Hallo {guild.name}!** Ich bin Dein neuer Bot – hier die vollständige Anleitung:\n\n"
 
         "**1️⃣ SETUP-Module**\n"
-        "—----------------------------------\n"
-        "• **Willkommen konfigurieren**\n"
-        "  Befehl: `!setup welcome`\n"
-        "    1. Du wirst nach dem Kanal gefragt (z.B. #welcome)\n"
-        "    2. Du wirst nach der Rolle gefragt, die den Trigger auslöst (z.B. @Newbie)\n"
-        "    3. Du gibst den Begrüßungstext ein. Platzhalter:\n"
-        "       • `{member}` → Erwähnung des neuen Members\n"
-        "       • `{guild}`  → Name des Servers\n"
-        "    Beispiel-Antwort:\n"
-        "      `Willkommen {member} auf {guild}! Schau Dich um und hab Spaß 😊`\n\n"
-        "• **Abschied konfigurieren**\n"
-        "  Befehl: `!setup leave`\n"
-        "    1. Kanal eingeben (z.B. #goodbye)\n"
-        "    2. Abschiedstext eingeben. Platzhalter:\n"
-        "       • `{member}` → Erwähnung des gehenden Members\n"
-        "       • `{guild}`  → Name des Servers\n"
-        "    Beispiel:\n"
-        "      `{member} hat uns verlassen… Wir werden Dich vermissen! 💔`\n\n"
+        "• `!setup welcome`\n"
+        "    – Begrüßungs-Kanal, Rolle und Template konfigurieren\n"
+        "    – Platzhalter: `{member}` (User-Mention), `{guild}` (Server-Name)\n"
+        "    – Beispiel: `Willkommen {member} auf {guild}! Hab Spaß! 😊`\n\n"
+        "• `!setup leave`\n"
+        "    – Abschieds-Kanal und Template konfigurieren\n"
+        "    – Platzhalter wie oben\n"
+        "    – Beispiel: `{member} hat uns verlassen… wir werden dich vermissen! 💔`\n\n"
 
         "**2️⃣ KANÄLE SPERREN & ENTSPERREN**\n"
-        "—----------------------------------\n"
-        "• **Sperren**\n"
-        "  Syntax: `!lock <#Kanal1> [#Kanal2 …] <HH:MM> <Minuten>`\n"
-        "    • `<#Kanal1> [#Kanal2 …]` → Mindestens einen Channel mentionen (Text oder Voice)\n"
-        "    • `<HH:MM>` → Uhrzeit im 24-Stunden-Format, z.B. `21:30`\n"
-        "    • `<Minuten>` → Dauer der Sperre (ganzzahlig), z.B. `15`\n"
-        "  Beispiel:\n"
-        "    `!lock #general #🔊Voice 21:30 15`\n"
-        "    → Sperrt #general und #Voice um 21:30 für 15 Minuten.\n\n"
-        "• **Entsperren**\n"
-        "  Syntax: `!unlock <#Kanal1> [#Kanal2 …]`\n"
-        "    • Hebt jede laufende Sperre sofort auf.\n"
-        "  Beispiel:\n"
-        "    `!unlock #general #🔊Voice`\n\n"
+        "• `!lock <#Kanal1> [#Kanal2 …] <HH:MM> <Minuten>`\n"
+        "    – Sperrt einen oder mehrere Text/Voice-Kanäle zur Uhrzeit für X Minuten\n"
+        "    – Beispiel: `!lock #general #Voice 21:30 15`\n\n"
+        "• `!unlock <#Kanal1> [#Kanal2 …]`\n"
+        "    – Hebt jede Sperre sofort auf\n"
+        "    – Beispiel: `!unlock #general #Voice`"
+    )
 
-        "**3️⃣ CHAT-CLEANUP (Automatisch löschen)**\n"
-        "—----------------------------------\n"
-        "• **Cleanup starten**\n"
-        "  Syntax: `!cleanup <#Kanal1> [#Kanal2 …] <Tage> <Minuten>`\n"
-        "    • `<Tage>` → Vollständige Tage (z.B. `1` = alle 24 h)\n"
-        "    • `<Minuten>` → Zusätzliche Minuten (z.B. `10`)\n"
-        "  Beispiele:\n"
-        "    • `!cleanup #general 0 10`  → löscht alle 10 Minuten\n"
-        "    • `!cleanup #logs 1 0`     → löscht alle 24 Stunden\n\n"
-        "• **Cleanup stoppen**\n"
-        "  Syntax: `!cleanup_stop <#Kanal1> [#Kanal2 …]`\n"
-        "    • Stoppt die automatische Löschung in den angegebenen Kanälen.\n\n"
+    part2 = (
+        "**3️⃣ CHAT-CLEANUP (automatisch löschen)**\n"
+        "• `!cleanup <#Kanal…> <Tage> <Minuten>`\n"
+        "    – Leert den Kanal im Abstand >Tage+Minuten<\n"
+        "    – `0 10` = alle 10 Minuten, `1 0` = alle 24 Stunden\n\n"
+        "• `!cleanup_stop <#Kanal…>`\n"
+        "    – Stoppt die automatische Löschung\n\n"
 
-        "**❗️ Wichtige Hinweise**\n"
-        "– **Rechte**:\n"
-        "   • Für `!lock`/`!unlock` benötigst Du **Manage Channels**-Rechte.\n"
-        "   • Für `!cleanup`/`!cleanup_stop` benötigst Du **Manage Messages**-Rechte.\n"
-        "   • Für `!setup` benötigst Du **Manage Server**-Rechte.\n"
-        "– **Platzhalter in Templates**: Immer in **geschweiften Klammern** genau so verwenden.\n"
-        "– **Interaktive Abfragen**: Wenn Parameter fehlen, fragt der Bot Dich automatisch.\n\n"
+        "**❗️ Wichtige Rechte**\n"
+        "– `!setup`: **Manage Server**\n"
+        "– `!lock`/`!unlock`: **Manage Channels**\n"
+        "– `!cleanup`/`!cleanup_stop`: **Manage Messages**\n\n"
 
-        "**✅ Nächste Schritte:**\n"
-        "1. Führe `!setup welcome` aus und folge den Anweisungen.\n"
-        "2. Führe `!setup leave` aus und gib Dein Abschiedstemplate ein.\n"
-        "3. Teste `!lock` und `!cleanup` mit kurzen Intervallen.\n\n"
+        "**✅ Nächste Schritte**\n"
+        "1. `!setup welcome` ausführen\n"
+        "2. `!setup leave` ausführen\n"
+        "3. `!lock` und `!cleanup` testen\n\n"
 
-        "ℹ️ Bitte lösche diese Nachricht, sobald Du alles eingerichtet hast.\n"
+        "ℹ️ Bitte lösche diese Nachricht, sobald Du bereit bist.\n"
         "Viel Spaß mit Deinem neuen Bot! 🚀"
     )
 
-    await target.send(info_text)
+    await target.send(part1)
+    await target.send(part2)
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
