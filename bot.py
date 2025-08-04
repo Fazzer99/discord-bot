@@ -257,44 +257,43 @@ async def unlock(ctx, channels: Greedy[discord.abc.GuildChannel]):
 # --- Welcome & Leave ------------------------------------------------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    guild_cfg = load_config()["guilds"].get(str(after.guild.id), {})
-    role_id   = guild_cfg.get("welcome_role")
-    chan_id   = guild_cfg.get("welcome_channel")
-    tmpl      = guild_cfg.get("templates", {}).get("welcome")
-    if role_id and chan_id and tmpl:
-        if role_id not in {r.id for r in before.roles} and role_id in {r.id for r in after.roles}:
-            ch   = after.guild.get_channel(chan_id)
-            text = tmpl.format(member=after.mention, guild=after.guild.name)
-            await ch.send(text)
+    # 1) Hole die aktuelle Guild-Config
+    cfg = get_guild_cfg(after.guild.id)
+    role_id    = cfg.get("welcome_role")
+    channel_id = cfg.get("welcome_channel")
+    tmpl       = cfg.get("templates", {}).get("welcome")
 
-@bot.event
-async def on_member_remove(member: discord.Member):
-    guild = member.guild
-    now   = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    # Debug: schreib ins Log, wer welche Rollen hat
+    print(f"[DEBUG] on_member_update: {after.name}, before={[r.id for r in before.roles]}, "
+          f"after={[r.id for r in after.roles]}, role_id={role_id}, channel_id={channel_id}")
 
-    # Kick-Check
-    try:
-        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
-            if entry.target.id == member.id and (now - entry.created_at).total_seconds() < 5:
-                return
-            break
-    except discord.Forbidden:
-        pass
-
-    # Ban-Check
-    try:
-        await guild.fetch_ban(member)
+    # 2) Sind alle drei Werte konfiguriert?
+    if not (role_id and channel_id and tmpl):
         return
-    except (discord.NotFound, discord.Forbidden):
-        pass
 
-    cfg     = load_config()["guilds"].get(str(guild.id), {})
-    chan_id = cfg.get("leave_channel")
-    tmpl    = cfg.get("templates", {}).get("leave")
-    if chan_id and tmpl:
-        ch   = guild.get_channel(chan_id)
-        text = tmpl.format(member=member.mention, guild=guild.name)
-        await ch.send(text)
+    # 3) Wurde die Rolle gerade erst hinzugefügt?
+    had_before = any(r.id == role_id for r in before.roles)
+    has_now    = any(r.id == role_id for r in after.roles)
+    if had_before or not has_now:
+        return
+
+    # 4) Finde Kanal
+    channel = after.guild.get_channel(channel_id)
+    if channel is None:
+        print(f"[WARN ] Kanal {channel_id} nicht gefunden")
+        return
+
+    # 5) Baue und sende die Willkommensnachricht
+    try:
+        text = tmpl.format(
+            member=after.mention,
+            guild=after.guild.name
+        )
+    except Exception as e:
+        print(f"[ERROR] Welcome-Template konnte nicht formatiert werden: {e}")
+        return
+
+    await channel.send(text)
 
 # --- Chat-Cleanup ---------------------------------------------------------
 cleanup_tasks: dict[int, asyncio.Task] = {}
