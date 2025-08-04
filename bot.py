@@ -379,28 +379,59 @@ async def cleanup_stop(ctx, channels: Greedy[discord.abc.GuildChannel]):
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # Versuche, das System-Channel zu finden, ansonsten das erste beschreibbare Text-Kanal
-    target = guild.system_channel
+    # Versuche, einen geeigneten Kanal zum Senden zu finden
+    target = guild.system_channel or next(
+        (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages),
+        None
+    )
     if target is None:
-        target = next(
-            (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages),
-            None
-        )
-    if target is None:
-        # Kein Kanal gefunden, in dem der Bot schreiben darf
-        return
+        return  # kein beschreibbarer Kanal gefunden
 
-    # Deine Kurzanleitung – passe die Liste der Befehle nach Bedarf an
     info_text = (
         f"👋 **Hallo {guild.name}!**\n\n"
-        "Danke, dass Du mich hier hinzugefügt hast. Hier kurz, wie Du mich nutzen kannst:\n"
-        "• `!setup welcome` – richte ein, wo und wie ich neue Mitglieder begrüße\n"
-        "• `!setup leave`   – richte ein, wo und wie ich Abschiedsnachrichten sende\n"
-        "• `!lock` / `!unlock` – Kanäle zeitlich sperren/entsperren\n"
-        "• `!cleanup` / `!cleanup_stop` – automatische Chat-Bereinigung (löschen)\n\n"
-        "ℹ️ Bitte lösche diese Nachricht, sobald Du die Infos gelesen hast.\n"
+        "**So startest Du mit mir:**\n\n"
+
+        "1️⃣ **Setup**\n"
+        "• `!setup welcome`\n"
+        "   – Fragt Kanal, Rolle und Begrüßungs-Template ab.\n"
+        "   • Kanal: #welcome-channel\n"
+        "   • Rolle: @Newbie (wann die Nachricht getriggert wird)\n"
+        "   • Template: z.B. `Willkommen {member} auf {guild}!`\n\n"
+        "• `!setup leave`\n"
+        "   – Fragt Kanal und Abschieds-Template ab.\n"
+        "   • Kanal: #goodbye-channel\n"
+        "   • Template: z.B. `{member} hat uns verlassen. 😢`\n\n"
+
+        "2️⃣ **Kanal sperren / entsperren**\n"
+        "• `!lock <#Kanal…> <HH:MM> <Minuten>`\n"
+        "   – Sperrt einen oder mehrere Text-/Sprachkanäle\n"
+        "     zur Uhrzeit `HH:MM` für `Minuten` Minuten.\n"
+        "   • Beispiel: `!lock #general #voice 21:30 15`\n\n"
+        "• `!unlock <#Kanal…>`\n"
+        "   – Hebt die Sperre sofort auf.\n"
+        "   • Beispiel: `!unlock #general #voice`\n\n"
+
+        "3️⃣ **Chat-Cleanup (Löschung)**\n"
+        "• `!cleanup <#Kanal…> <Tage> <Minuten>`\n"
+        "   – Leert den Kanal regelmäßig im Abstand von Tagen+Minuten.\n"
+        "   • 0 10 = alle 10 Minuten\n"
+        "   • 1  0 = alle 24 Stunden\n\n"
+        "• `!cleanup_stop <#Kanal…>`\n"
+        "   – Stoppt die automatische Löschung.\n\n"
+
+        "ℹ️ **Hinweis:**\n"
+        "– Alle Befehle erfordern **Manage Channels** bzw. **Manage Messages**-Rechte oder eine eingerichtete Admin/Mod-Rolle.\n"
+        "– Bei Nachfrage fragt dich der Bot interaktiv nach fehlenden Parametern.\n\n"
+
+        "⚙️ **Nächste Schritte:**\n"
+        "1. `!setup welcome` → Begrüßung konfigurieren\n"
+        "2. `!setup leave`   → Abschied konfigurieren\n"
+        "3. Probiere `!lock` und `!cleanup` aus\n\n"
+
+        "ℹ️ Bitte lösche diese Nachricht, sobald Du alles eingerichtet hast.\n"
         "Viel Spaß mit Deinem neuen Bot! 🚀"
     )
+
     await target.send(info_text)
 
 # --- Bot Start ------------------------------------------------------------
