@@ -78,7 +78,7 @@ async def setup(ctx, module: str):
     channel = msg.channel_mentions[0]
     guild_cfg[f"{module}_channel"] = channel.id
 
-    # für welcome: Rolle abfragen
+    # für welcome: Rolle abfragen (Trigger, wird aber nicht im Template verwendet)
     if module == "welcome":
         await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
         def check_role(m: discord.Message):
@@ -94,15 +94,13 @@ async def setup(ctx, module: str):
         role = msgr.role_mentions[0]
         guild_cfg["welcome_role"] = role.id
 
-    # 2) Template abfragen
+    # 2) Template abfragen (nur member & guild als Platzhalter)
     lines = [
         f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.",
         "Verwende Platzhalter:",
         "`{member}` → Member-Mention",
         "`{guild}`  → Server-Name"
     ]
-    if module == "welcome":
-        lines.append("`{role}`   → Erwähnte Rolle")
     await ctx.send("\n".join(lines))
 
     def check_txt(m: discord.Message):
