@@ -66,7 +66,11 @@ async def setup(ctx, module: str):
     # 1) Kanal abfragen
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
     def check_chan(m: discord.Message):
-        return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
+        return (
+            m.author == ctx.author and
+            m.channel == ctx.channel and
+            m.channel_mentions
+        )
     try:
         msg = await bot.wait_for("message", check=check_chan, timeout=60)
     except asyncio.TimeoutError:
@@ -78,7 +82,11 @@ async def setup(ctx, module: str):
     if module == "welcome":
         await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
         def check_role(m: discord.Message):
-            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+            return (
+                m.author == ctx.author and
+                m.channel == ctx.channel and
+                m.role_mentions
+            )
         try:
             msgr = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
@@ -87,15 +95,22 @@ async def setup(ctx, module: str):
         guild_cfg["welcome_role"] = role.id
 
     # 2) Template abfragen
-    await ctx.send(
-        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
-        "Verwende Platzhalter:\n"
-        "`{member}` → Member-Mention\n"
-        "`{guild}`  → Server-Name\n"
-        ( "`{role}` → erwähnte Rolle\n" if module=="welcome" else "" )
-    )
+    lines = [
+        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.",
+        "Verwende Platzhalter:",
+        "`{member}` → Member-Mention",
+        "`{guild}`  → Server-Name"
+    ]
+    if module == "welcome":
+        lines.append("`{role}`   → Erwähnte Rolle")
+    await ctx.send("\n".join(lines))
+
     def check_txt(m: discord.Message):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
+        return (
+            m.author == ctx.author and
+            m.channel == ctx.channel and
+            m.content.strip()
+        )
     try:
         msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
     except asyncio.TimeoutError:
