@@ -1,4 +1,5 @@
-import os 
+import os
+import json
 import asyncio
 import datetime
 from zoneinfo import ZoneInfo
@@ -6,174 +7,200 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
-from discord.ext.commands import Greedy, MissingRequiredArgument, MissingPermissions
+from discord.ext.commands import Greedy
 
-# Load .env
+# --- Config‐Helpers --------------------------------------------------------
+CONFIG_PATH = "config.json"
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        return {"guilds": {}}
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_config(cfg: dict):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+def get_guild_cfg(guild_id: int) -> dict:
+    cfg = load_config()
+    return cfg["guilds"].setdefault(str(guild_id), {})
+
+# --- Environment & Bot ----------------------------------------------------
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 if TOKEN is None:
-    raise RuntimeError(
-        "Discord-Token nicht gefunden. Stelle sicher, dass .env im Arbeitsverzeichnis liegt und DISCORD_TOKEN gesetzt ist."
-    )
+    raise RuntimeError("Discord-Token nicht gefunden. Stelle sicher, dass .env korrekt ist.")
 
-# Bot-Intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # für on_member_update benötigt
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Speichert laufende Unlock-Timer: channel.id → Task
-lock_tasks: dict[int, asyncio.Task] = {}
-# Speichert originalen view_channel-Status für OG-Rollen: channel.id → {"og": bool|None, "senior": bool|None}
-role_views: dict[int, dict[str, bool | None]] = {}
-
-# IDs der OG-Rollen
-OG_ROLE_ID = 1386723945583218749
-SENIOR_OG_ROLE_ID = 1387936511260889158
-# IDs der Rollen mit Bot-Rechten
-ADMIN_ROLE_ID = 1386726424441786448
-MOD_ROLE_ID   = 1386723766041706506
-
-# IDs für Welcome-Funktion
-NEWBIE_ROLE_ID        = 1388900287468535818
-WELCOME_CHANNEL_ID    = 1386788177062395946
-RULES_CHANNEL_ID      = 1386721701450219592
-ANNOUNCEMENTS_CHANNEL_ID = 1386721701450219594
-TICKET_ID = 1390380110645035030
-
-# IDs für Abschieds-Funktion
-LEAVE_CHANNEL_ID = 1394309783200464967
-
+# --- Error Handler --------------------------------------------------------
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, MissingRequiredArgument):
-        await ctx.send(
-            f"❌ Fehlendes Argument: `{error.param.name}`\n"
-            "Verwendung:\n"
-            "• `!lock <#Kanal…> <HH:MM> <Minuten>`\n"
-            "• `!unlock <#Kanal…>`"
-        )
-    elif isinstance(error, MissingPermissions):
-        await ctx.send("❌ Du benötigst `Manage Channels`-Rechte.")
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Fehlendes Argument: `{error.param.name}`")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Du hast nicht die nötigen Rechte.")
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send("❌ Du hast nicht die nötigen Rechte, um diesen Befehl auszuführen.")
+        await ctx.send("❌ Du hast nicht die nötigen Rechte für diesen Befehl.")
     else:
         raise error
 
-@bot.command(name="lock")
-@commands.check_any(
-    commands.has_permissions(manage_channels=True),
-    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
-)
-async def lock(
-    ctx,
-    channels: Greedy[discord.abc.GuildChannel],
-    start_time: str,
-    duration: int
-):
+# --- Setup Wizard ---------------------------------------------------------
+@bot.command(name="setup")
+@commands.has_permissions(manage_guild=True)
+async def setup(ctx, module: str):
     """
-    Sperrt Kanäle zur Uhrzeit für duration Minuten.
-    • Öffentlich: @everyone verliert send/connect.
-    • Privat: OG & Senior OG verlieren send/connect, Sichtbarkeit bleibt.
+    Interaktives Setup für Module:
+      welcome, leave
+    """
+    module = module.lower()
+    if module not in ("welcome", "leave"):
+        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`.")
+
+    guild_cfg = get_guild_cfg(ctx.guild.id)
+
+    # 1) Kanal abfragen
+    await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
+    def check_chan(m: discord.Message):
+        return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
+    try:
+        msg = await bot.wait_for("message", check=check_chan, timeout=60)
+    except asyncio.TimeoutError:
+        return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
+    channel = msg.channel_mentions[0]
+    guild_cfg[f"{module}_channel"] = channel.id
+
+    # für welcome: Rolle abfragen
+    if module == "welcome":
+        await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
+        def check_role(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+        try:
+            msgr = await bot.wait_for("message", check=check_role, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.")
+        role = msgr.role_mentions[0]
+        guild_cfg["welcome_role"] = role.id
+
+    # 2) Template abfragen
+    await ctx.send(
+        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
+        "Verwende Platzhalter:\n"
+        "`{member}` → Member-Mention\n"
+        "`{guild}`  → Server-Name\n"
+        ( "`{role}` → erwähnte Rolle\n" if module=="welcome" else "" )
+    )
+    def check_txt(m: discord.Message):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
+    try:
+        msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
+    except asyncio.TimeoutError:
+        return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
+    guild_cfg.setdefault("templates", {})[module] = msg2.content
+
+    save_config(load_config())
+    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
+
+# --- Lock / Unlock --------------------------------------------------------
+lock_tasks: dict[int, asyncio.Task] = {}
+
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: str, duration: int):
+    """
+    Sperrt Kanäle zur Uhrzeit für `duration` Minuten.
+    Öffentlich: @everyone verliert send/connect.
+    Privat: alle Rollen, die Sichtbarkeit haben, verlieren send/connect, bleiben sichtbar.
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
 
-    # Zeit parsen
+    # Uhrzeit parsen
     try:
         hour, minute = map(int, start_time.split(":"))
     except ValueError:
         return await ctx.send("❌ Ungültiges Format. Bitte `HH:MM` im 24h-Format.")
 
-    # Verzögerung berechnen (Berlin)
-    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    now    = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += datetime.timedelta(days=1)
     delay = (target - now).total_seconds()
-
     everyone = ctx.guild.default_role
-    og = ctx.guild.get_role(OG_ROLE_ID)
-    senior = ctx.guild.get_role(SENIOR_OG_ROLE_ID)
 
-    for ch in channels:
-        # laufenden Task abbrechen
-        if ch.id in lock_tasks:
-            lock_tasks[ch.id].cancel()
+    # Template laden
+    cfg  = load_config()["guilds"].get(str(ctx.guild.id), {})
+    tmpl = cfg.get("templates", {}).get("lock", 
+        "🔒 Kanal {channel} gesperrt um {time} für {duration} Minuten 🚫"
+    )
 
-        # originalen view_channel-Status für OG & Senior speichern
-        role_views[ch.id] = {
-            "og": ch.overwrites_for(og).view_channel if og else None,
-            "senior": ch.overwrites_for(senior).view_channel if senior else None
-        }
+    for channel in channels:
+        # Laufenden Task abbrechen
+        if channel.id in lock_tasks:
+            lock_tasks[channel.id].cancel()
 
-        # prüfen, ob der Kanal privat ist (everyone.view_channel=False)
-        private = (ch.overwrites_for(everyone).view_channel is False)
+        priv_over = channel.overwrites_for(everyone)
+        is_priv   = (priv_over.view_channel is False)
 
-        async def _do_lock(channel, wait, dur, is_private):
+        # Rollen sammeln, die sichtbar sind
+        private_roles = []
+        if is_priv:
+            for role_obj, over in channel.overwrites.items():
+                if isinstance(role_obj, discord.Role) and over.view_channel:
+                    private_roles.append(role_obj)
+
+        async def _do_lock(ch, wait, dur):
             await asyncio.sleep(wait)
-
-            # Sperre anwenden
-            if isinstance(channel, discord.TextChannel):
-                if is_private:
-                    if og:
-                        await channel.set_permissions(og, send_messages=False, view_channel=role_views[channel.id]["og"])
-                    if senior:
-                        await channel.set_permissions(senior, send_messages=False, view_channel=role_views[channel.id]["senior"])
+            # Permissions setzen
+            if isinstance(ch, discord.TextChannel):
+                if is_priv:
+                    for r in private_roles:
+                        await ch.set_permissions(r, send_messages=False, view_channel=True)
                 else:
-                    await channel.set_permissions(everyone, send_messages=False)
-            else:  # VoiceChannel
-                if is_private:
-                    if og:
-                        await channel.set_permissions(og, connect=False, speak=False, view_channel=role_views[channel.id]["og"])
-                    if senior:
-                        await channel.set_permissions(senior, connect=False, speak=False, view_channel=role_views[channel.id]["senior"])
+                    await ch.set_permissions(everyone, send_messages=False)
+            else:
+                if is_priv:
+                    for r in private_roles:
+                        await ch.set_permissions(r, connect=False, speak=False, view_channel=True)
                 else:
-                    await channel.set_permissions(everyone, connect=False, speak=False)
-                # Kicke alle, die drin sind
-                for m in channel.members:
+                    await ch.set_permissions(everyone, connect=False, speak=False)
+                for m in ch.members:
                     try: await m.move_to(None)
                     except: pass
 
-            await channel.send(f"🔒 Kanal automatisch gesperrt um {start_time} Uhr, da Rina gerade live ist – für {dur} Minuten nicht verfügbar 🚫")
+            # Template-Nachricht
+            msg = tmpl.format(channel=ch.mention, time=start_time, duration=dur, guild=ctx.guild.name)
+            await ch.send(msg)
 
-            # Warte Dauer
             await asyncio.sleep(dur * 60)
-
             # Entsperren
-            if isinstance(channel, discord.TextChannel):
-                if is_private:
-                    if og:
-                        await channel.set_permissions(og, send_messages=None, view_channel=role_views[channel.id]["og"])
-                    if senior:
-                        await channel.set_permissions(senior, send_messages=None, view_channel=role_views[channel.id]["senior"])
+            if isinstance(ch, discord.TextChannel):
+                if is_priv:
+                    for r in private_roles:
+                        await ch.set_permissions(r, send_messages=None, view_channel=True)
                 else:
-                    await channel.set_permissions(everyone, send_messages=None)
+                    await ch.set_permissions(everyone, send_messages=None)
             else:
-                if is_private:
-                    if og:
-                        await channel.set_permissions(og, connect=None, speak=None, view_channel=role_views[channel.id]["og"])
-                    if senior:
-                        await channel.set_permissions(senior, connect=None, speak=None, view_channel=role_views[channel.id]["senior"])
+                if is_priv:
+                    for r in private_roles:
+                        await ch.set_permissions(r, connect=None, speak=None, view_channel=True)
                 else:
-                    await channel.set_permissions(everyone, connect=None, speak=None)
+                    await ch.set_permissions(everyone, connect=None, speak=None)
 
-            await channel.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
-            await ctx.send(f"🔓 {channel.mention} wurde automatisch entsperrt.")
-            lock_tasks.pop(channel.id, None)
-            role_views.pop(channel.id, None)
+            await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
+            await ctx.send(f"🔓 {ch.mention} wurde automatisch entsperrt.")
+            lock_tasks.pop(ch.id, None)
 
-        # Task starten
-        t = bot.loop.create_task(_do_lock(ch, delay, duration, private))
-        lock_tasks[ch.id] = t
-
-        await ctx.send(f"⏰ {ch.mention} wird um {start_time} Uhr für {duration} Min. gesperrt.")
+        task = bot.loop.create_task(_do_lock(channel, delay, duration))
+        lock_tasks[channel.id] = task
+        await ctx.send(f"⏰ {channel.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt.")
 
 @bot.command(name="unlock")
-@commands.check_any(
-    commands.has_permissions(manage_channels=True),
-    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
-)
+@commands.has_permissions(manage_channels=True)
 async def unlock(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
     Hebbt Sperre sofort auf.
@@ -182,159 +209,130 @@ async def unlock(ctx, channels: Greedy[discord.abc.GuildChannel]):
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
 
     everyone = ctx.guild.default_role
-    og = ctx.guild.get_role(OG_ROLE_ID)
-    senior = ctx.guild.get_role(SENIOR_OG_ROLE_ID)
+    cfg = load_config()["guilds"].get(str(ctx.guild.id), {})
+    tmpl = cfg.get("templates", {}).get("unlock", 
+        "🔓 Kanal {channel} entsperrt."
+    )
 
-    for ch in channels:
-        if ch.id in lock_tasks:
-            lock_tasks[ch.id].cancel()
-            lock_tasks.pop(ch.id, None)
+    for channel in channels:
+        if channel.id in lock_tasks:
+            lock_tasks[channel.id].cancel()
+            lock_tasks.pop(channel.id, None)
 
-        private = (ch.overwrites_for(everyone).view_channel is False)
-        orig = role_views.pop(ch.id, {"og": None, "senior": None})
+        is_priv = channel.overwrites_for(everyone).view_channel is False
+        private_roles = []
+        if is_priv:
+            for role_obj, over in channel.overwrites.items():
+                if isinstance(role_obj, discord.Role) and over.view_channel:
+                    private_roles.append(role_obj)
 
-        if isinstance(ch, discord.TextChannel):
-            if private:
-                if og:
-                    await ch.set_permissions(og, send_messages=None, view_channel=orig["og"])
-                if senior:
-                    await ch.set_permissions(senior, send_messages=None, view_channel=orig["senior"])
+        if isinstance(channel, discord.TextChannel):
+            if is_priv:
+                for r in private_roles:
+                    await channel.set_permissions(r, send_messages=None, view_channel=True)
             else:
-                await ch.set_permissions(everyone, send_messages=None)
+                await channel.set_permissions(everyone, send_messages=None)
         else:
-            if private:
-                if og:
-                    await ch.set_permissions(og, connect=None, speak=None, view_channel=orig["og"])
-                if senior:
-                    await ch.set_permissions(senior, connect=None, speak=None, view_channel=orig["senior"])
+            if is_priv:
+                for r in private_roles:
+                    await channel.set_permissions(r, connect=None, speak=None, view_channel=True)
             else:
-                await ch.set_permissions(everyone, connect=None, speak=None)
+                await channel.set_permissions(everyone, connect=None, speak=None)
 
-        await ctx.send(f"🔓 {ch.mention} entsperrt.")
+        await channel.send(tmpl.format(channel=channel.mention, guild=ctx.guild.name))
 
-# --- Neue Willkommensfunktion für Newbie-Rolle ---
+# --- Welcome & Leave ------------------------------------------------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # prüfen, ob Newbie-Rolle neu hinzugefügt wurde
-    if NEWBIE_ROLE_ID not in {r.id for r in before.roles} and NEWBIE_ROLE_ID in {r.id for r in after.roles}:
-        ch = after.guild.get_channel(WELCOME_CHANNEL_ID)
-        if ch:
-            await ch.send(
-                f"📣 @everyone Ein neues Mitglied ist da: {after.mention} 🎉\n\n"
-                f"Willkommen auf **{after.guild.name}** 👋\n"
-                f"Mach’s dir bequem – wir freuen uns, dass du hier bist. 😄\n\n"
-                f"🔓 Sammle XP durch Aktivität im Chat und steigere dein Level!"
-                f"Bitte lies unsere Regeln in <#{RULES_CHANNEL_ID}> und schau in <#{ANNOUNCEMENTS_CHANNEL_ID}> für Neuigkeiten.\n\n"
-                f"Bei Fragen helfen dir unsere Mods jederzeit gerne weiter! Öffne hierfür hier ein Ticket: <#{TICKET_ID}>\n— Deine Rina🐥"
-            )
+    guild_cfg = load_config()["guilds"].get(str(after.guild.id), {})
+    role_id   = guild_cfg.get("welcome_role")
+    chan_id   = guild_cfg.get("welcome_channel")
+    tmpl      = guild_cfg.get("templates", {}).get("welcome")
+    if role_id and chan_id and tmpl:
+        if role_id not in {r.id for r in before.roles} and role_id in {r.id for r in after.roles}:
+            ch   = after.guild.get_channel(chan_id)
+            text = tmpl.format(member=after.mention, guild=after.guild.name)
+            await ch.send(text)
 
-# --- Abschieds-Funktion: wenn Mitglieder freiwillig verlassen ---
 @bot.event
 async def on_member_remove(member: discord.Member):
     guild = member.guild
-    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    now   = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
 
-    # 1. Kick-Check
-    kicked = False
+    # Kick-Check
     try:
         async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
             if entry.target.id == member.id and (now - entry.created_at).total_seconds() < 5:
-                kicked = True
+                return
             break
     except discord.Forbidden:
-        kicked = False
-    if kicked:
-        return
+        pass
 
-    # 2. Ban-Check über fetch_ban (mit member)
+    # Ban-Check
     try:
         await guild.fetch_ban(member)
         return
-    except discord.NotFound:
-        pass
-    except discord.Forbidden:
+    except (discord.NotFound, discord.Forbidden):
         pass
 
-    # 3. Freiwilliges Verlassen → Abschied posten
-    ch = guild.get_channel(LEAVE_CHANNEL_ID)
-    if ch:
-        try:
-            await ch.send(f"😢 {member.mention} hat den Server verlassen. @everyone werden dich vermissen! 💔")
-        except discord.Forbidden:
-            print(f"Kann in Kanal {LEAVE_CHANNEL_ID} nicht schreiben.")
+    cfg     = load_config()["guilds"].get(str(guild.id), {})
+    chan_id = cfg.get("leave_channel")
+    tmpl    = cfg.get("templates", {}).get("leave")
+    if chan_id and tmpl:
+        ch   = guild.get_channel(chan_id)
+        text = tmpl.format(member=member.mention, guild=guild.name)
+        await ch.send(text)
 
-# --- Chat-Cleanup-Funktion ---
+# --- Chat-Cleanup ---------------------------------------------------------
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
 def _compute_pre_notify(interval: float) -> float | None:
-    # gibt zurück, nach wie vielen Sekunden wir warnen
-    if interval >= 3600:
-        return interval - 3600
-    if interval >= 300:
-        return interval - 300
+    if interval >= 3600: return interval - 3600
+    if interval >= 300:  return interval - 300
     return None
 
 def age_seconds(msg: discord.Message) -> float:
-    # Alter einer Nachricht in Sekunden
     now = datetime.datetime.now(tz=msg.created_at.tzinfo)
     return (now - msg.created_at).total_seconds()
 
 async def _purge_all(channel: discord.TextChannel):
-    """Löscht alle Nachrichten – bulk für <14 Tage, einzeln älter."""
     cutoff = 14 * 24 * 3600
     while True:
         msgs = [m async for m in channel.history(limit=100)]
         if not msgs:
             break
-
-        # 1) Bulk löschen (<14 Tage) in 100er-Batches
         to_bulk = [m for m in msgs if age_seconds(m) < cutoff]
         for i in range(0, len(to_bulk), 100):
-            batch = to_bulk[i:i+100]
-            await channel.delete_messages(batch)
-            await asyncio.sleep(3)  # Pause nach jedem Bulk‑Batch
-
-        # 2) Einzel‑Löschung für ältere Nachrichten (ohne Exception-Fang)
+            await channel.delete_messages(to_bulk[i:i+100])
+            await asyncio.sleep(3)
         old = [m for m in msgs if age_seconds(m) >= cutoff]
         for m in old:
             await m.delete()
-            await asyncio.sleep(1)  # Pause zwischen Einzel-Deletes
+            await asyncio.sleep(1)
 
 @bot.command(name="cleanup")
-@commands.check_any(
-    commands.has_permissions(manage_messages=True),
-    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
-)
-async def cleanup(
-    ctx,
-    channels: Greedy[discord.abc.GuildChannel],
-    days: int,
-    minutes: int
-):
+@commands.has_permissions(manage_messages=True)
+async def cleanup(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, minutes: int):
     """
-    Startet eine wiederkehrende Löschung aller Nachrichten in den angegebenen Kanälen.
+    Wiederkehrende Löschung in Kanälen.
     Usage: !cleanup <#Kanal…> <Tage> <Minuten>
-    Beispiel: !cleanup #general 0 10    → alle 10 Minuten
-              !cleanup #logs 1 0       → alle 24 Stunden
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
     interval = days * 86400 + minutes * 60
     if interval <= 0:
-        return await ctx.send("❌ Ungültige Intervalle – bitte Tage oder Minuten > 0 angeben.")
+        return await ctx.send("❌ Ungültiges Intervall.")
 
     await ctx.send(
         f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} "
-        f"werden alle {days} Tage und {minutes} Minuten gelöscht."
+        f"werden alle {days} Tage und {minutes} Minuten gelöscht."
     )
 
     for ch in channels:
-        # vorhandenen Task abbrechen
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
 
         async def _loop_cleanup(channel: discord.TextChannel, interval_s: float):
-            # sofortige Erst-Löschung
             await _purge_all(channel)
             try:
                 await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
@@ -343,21 +341,15 @@ async def cleanup(
 
             pre = _compute_pre_notify(interval_s)
             while True:
-                # Vorwarnung
                 if pre is not None:
                     await asyncio.sleep(pre)
-                    warn_minutes = (interval_s - pre) / 60
-                    if warn_minutes >= 60:
-                        wt = int(warn_minutes // 60)
-                        await channel.send(f"⚠️ Achtung: In {wt} Stunde(n) werden gleich alle Nachrichten gelöscht.")
-                    else:
-                        wm = int(warn_minutes)
-                        await channel.send(f"⚠️ Achtung: In {wm} Minute(n) werden gleich alle Nachrichten gelöscht.")
+                    wm = (interval_s - pre) / 60
+                    text = f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)"
+                    await channel.send(f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
                     await asyncio.sleep(interval_s - pre)
                 else:
                     await asyncio.sleep(interval_s)
 
-                # nächste Löschrunde
                 await _purge_all(channel)
                 try:
                     await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
@@ -368,16 +360,10 @@ async def cleanup(
         cleanup_tasks[ch.id] = task
 
 @bot.command(name="cleanup_stop")
-@commands.check_any(
-    commands.has_permissions(manage_messages=True),
-    commands.has_any_role(ADMIN_ROLE_ID, MOD_ROLE_ID)
-)
-async def cleanup_stop(
-    ctx,
-    channels: Greedy[discord.abc.GuildChannel]
-):
+@commands.has_permissions(manage_messages=True)
+async def cleanup_stop(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
-    Stoppt die automatische Löschung in den angegebenen Kanälen.
+    Stoppt die automatische Löschung.
     Usage: !cleanup_stop <#Kanal…>
     """
     if not channels:
@@ -390,5 +376,32 @@ async def cleanup_stop(
         else:
             await ctx.send(f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
 
-# Starte den Bot
+# --- Guild Join Event -----------------------------------------------------
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # Versuche, das System-Channel zu finden, ansonsten das erste beschreibbare Text-Kanal
+    target = guild.system_channel
+    if target is None:
+        target = next(
+            (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages),
+            None
+        )
+    if target is None:
+        # Kein Kanal gefunden, in dem der Bot schreiben darf
+        return
+
+    # Deine Kurzanleitung – passe die Liste der Befehle nach Bedarf an
+    info_text = (
+        f"👋 **Hallo {guild.name}!**\n\n"
+        "Danke, dass Du mich hier hinzugefügt hast. Hier kurz, wie Du mich nutzen kannst:\n"
+        "• `!setup welcome` – richte ein, wo und wie ich neue Mitglieder begrüße\n"
+        "• `!setup leave`   – richte ein, wo und wie ich Abschiedsnachrichten sende\n"
+        "• `!lock` / `!unlock` – Kanäle zeitlich sperren/entsperren\n"
+        "• `!cleanup` / `!cleanup_stop` – automatische Chat-Bereinigung (löschen)\n\n"
+        "ℹ️ Bitte lösche diese Nachricht, sobald Du die Infos gelesen hast.\n"
+        "Viel Spaß mit Deinem neuen Bot! 🚀"
+    )
+    await target.send(info_text)
+
+# --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
