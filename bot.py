@@ -4,38 +4,67 @@ import asyncio
 import datetime
 from zoneinfo import ZoneInfo
 
+import asyncpg
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord.ext.commands import Greedy
 
-# --- Config‐Helpers --------------------------------------------------------
-CONFIG_PATH = "config.json"
-
-def load_config() -> dict:
-    if not os.path.exists(CONFIG_PATH):
-        return {"guilds": {}}
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_config(cfg: dict):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-def get_guild_cfg(guild_id: int) -> dict:
-    cfg = load_config()
-    return cfg["guilds"].setdefault(str(guild_id), {})
-
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN  = os.getenv("DISCORD_TOKEN")
+DB_URL = os.getenv("DATABASE_URL")
+
 if TOKEN is None:
     raise RuntimeError("Discord-Token nicht gefunden. Stelle sicher, dass .env korrekt ist.")
+if DB_URL is None:
+    raise RuntimeError("DATABASE_URL nicht gefunden. Bitte PostgreSQL-Plugin in Railway prüfen.")
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.members         = True  # für Member-Events benötigt
+bot       = commands.Bot(command_prefix="!", intents=intents)
+db_pool: asyncpg.Pool | None = None
+
+# --- Guild-DB-Helpers -----------------------------------------------------
+async def get_guild_cfg(guild_id: int) -> dict:
+    """Lädt oder initialisiert die Zeile für guild_id."""
+    row = await db_pool.fetchrow(
+        "SELECT * FROM guild_settings WHERE guild_id = $1", guild_id
+    )
+    if row:
+        return dict(row)
+    # neu anlegen
+    await db_pool.execute(
+        "INSERT INTO guild_settings (guild_id) VALUES ($1)", guild_id
+    )
+    return await get_guild_cfg(guild_id)
+
+async def update_guild_cfg(guild_id: int, **fields):
+    """Schreibt einzelne Felder zurück in die DB."""
+    cols = ", ".join(f"{k}= $${i+2}" for i, k in enumerate(fields))
+    vals = [guild_id] + list(fields.values())
+    await db_pool.execute(
+        f"UPDATE guild_settings SET {cols} WHERE guild_id = $1", *vals
+    )
+
+# --- Startup --------------------------------------------------------------
+@bot.event
+async def on_ready():
+    global db_pool
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(dsn=DB_URL)
+        # Tabelle anlegen, falls nicht vorhanden
+        await db_pool.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+              guild_id        BIGINT PRIMARY KEY,
+              welcome_channel BIGINT,
+              welcome_role    BIGINT,
+              leave_channel   BIGINT,
+              templates       JSONB DEFAULT '{}'::jsonb
+            );
+        """)
+    print(f"✅ Bot ist ready als {bot.user} und DB-Pool initialisiert")
 
 # --- Error Handler --------------------------------------------------------
 @bot.event
@@ -61,40 +90,32 @@ async def setup(ctx, module: str):
     if module not in ("welcome", "leave"):
         return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`.")
 
-    guild_cfg = get_guild_cfg(ctx.guild.id)
+    cfg = await get_guild_cfg(ctx.guild.id)
 
     # 1) Kanal abfragen
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
     def check_chan(m: discord.Message):
-        return (
-            m.author == ctx.author and
-            m.channel == ctx.channel and
-            m.channel_mentions
-        )
+        return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
     try:
         msg = await bot.wait_for("message", check=check_chan, timeout=60)
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
     channel = msg.channel_mentions[0]
-    guild_cfg[f"{module}_channel"] = channel.id
+    await update_guild_cfg(ctx.guild.id, **{f"{module}_channel": channel.id})
 
-    # für welcome: Rolle abfragen (Trigger, wird aber nicht im Template verwendet)
+    # für welcome: Rolle abfragen
     if module == "welcome":
         await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
         def check_role(m: discord.Message):
-            return (
-                m.author == ctx.author and
-                m.channel == ctx.channel and
-                m.role_mentions
-            )
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msgr = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.")
         role = msgr.role_mentions[0]
-        guild_cfg["welcome_role"] = role.id
+        await update_guild_cfg(ctx.guild.id, welcome_role=role.id)
 
-    # 2) Template abfragen (nur member & guild als Platzhalter)
+    # 2) Template abfragen
     lines = [
         f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.",
         "Verwende Platzhalter:",
@@ -104,18 +125,16 @@ async def setup(ctx, module: str):
     await ctx.send("\n".join(lines))
 
     def check_txt(m: discord.Message):
-        return (
-            m.author == ctx.author and
-            m.channel == ctx.channel and
-            m.content.strip()
-        )
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
     try:
         msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
-    guild_cfg.setdefault("templates", {})[module] = msg2.content
+    # templates JSON updaten
+    new_templates = (await get_guild_cfg(ctx.guild.id))["templates"]
+    new_templates[module] = msg2.content
+    await update_guild_cfg(ctx.guild.id, templates=new_templates)
 
-    save_config(load_config())
     await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
 
 # --- Lock / Unlock --------------------------------------------------------
@@ -123,7 +142,7 @@ lock_tasks: dict[int, asyncio.Task] = {}
 
 @bot.command(name="lock")
 @commands.has_permissions(manage_channels=True)
-async def lock(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: str, duration: int):
+async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: str, duration: int):
     """
     Sperrt Kanäle zur Uhrzeit für `duration` Minuten.
     Öffentlich: @everyone verliert send/connect.
@@ -131,168 +150,169 @@ async def lock(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: str,
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
-
-    # Uhrzeit parsen
+    # Zeit parsen
     try:
         hour, minute = map(int, start_time.split(":"))
     except ValueError:
         return await ctx.send("❌ Ungültiges Format. Bitte `HH:MM` im 24h-Format.")
-
     now    = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += datetime.timedelta(days=1)
-    delay = (target - now).total_seconds()
+    delay    = (target - now).total_seconds()
     everyone = ctx.guild.default_role
 
     # Template laden
-    cfg  = load_config()["guilds"].get(str(ctx.guild.id), {})
-    tmpl = cfg.get("templates", {}).get("lock", 
+    cfg = await get_guild_cfg(ctx.guild.id)
+    tmpl = cfg["templates"].get("lock",
         "🔒 Kanal {channel} gesperrt um {time} für {duration} Minuten 🚫"
     )
 
-    for channel in channels:
-        # Laufenden Task abbrechen
-        if channel.id in lock_tasks:
-            lock_tasks[channel.id].cancel()
+    for ch in channels:
+        if ch.id in lock_tasks:
+            lock_tasks[ch.id].cancel()
 
-        priv_over = channel.overwrites_for(everyone)
+        priv_over = ch.overwrites_for(everyone)
         is_priv   = (priv_over.view_channel is False)
-
-        # Rollen sammeln, die sichtbar sind
         private_roles = []
         if is_priv:
-            for role_obj, over in channel.overwrites.items():
+            for role_obj, over in ch.overwrites.items():
                 if isinstance(role_obj, discord.Role) and over.view_channel:
                     private_roles.append(role_obj)
 
-        async def _do_lock(ch, wait, dur):
+        async def _do_lock(channel, wait, dur):
             await asyncio.sleep(wait)
-            # Permissions setzen
-            if isinstance(ch, discord.TextChannel):
+            # Sperre setzen
+            if isinstance(channel, discord.TextChannel):
                 if is_priv:
                     for r in private_roles:
-                        await ch.set_permissions(r, send_messages=False, view_channel=True)
+                        await channel.set_permissions(r, send_messages=False, view_channel=True)
                 else:
-                    await ch.set_permissions(everyone, send_messages=False)
+                    await channel.set_permissions(everyone, send_messages=False)
             else:
                 if is_priv:
                     for r in private_roles:
-                        await ch.set_permissions(r, connect=False, speak=False, view_channel=True)
+                        await channel.set_permissions(r, connect=False, speak=False, view_channel=True)
                 else:
-                    await ch.set_permissions(everyone, connect=False, speak=False)
-                for m in ch.members:
+                    await channel.set_permissions(everyone, connect=False, speak=False)
+                for m in channel.members:
                     try: await m.move_to(None)
                     except: pass
 
-            # Template-Nachricht
-            msg = tmpl.format(channel=ch.mention, time=start_time, duration=dur, guild=ctx.guild.name)
-            await ch.send(msg)
+            # Nachricht senden
+            msg = tmpl.format(channel=channel.mention, time=start_time, duration=dur)
+            await channel.send(msg)
 
+            # Timer und Entsperren
             await asyncio.sleep(dur * 60)
-            # Entsperren
-            if isinstance(ch, discord.TextChannel):
+            if isinstance(channel, discord.TextChannel):
                 if is_priv:
                     for r in private_roles:
-                        await ch.set_permissions(r, send_messages=None, view_channel=True)
+                        await channel.set_permissions(r, send_messages=None, view_channel=True)
                 else:
-                    await ch.set_permissions(everyone, send_messages=None)
+                    await channel.set_permissions(everyone, send_messages=None)
             else:
                 if is_priv:
                     for r in private_roles:
-                        await ch.set_permissions(r, connect=None, speak=None, view_channel=True)
+                        await channel.set_permissions(r, connect=None, speak=None, view_channel=True)
                 else:
-                    await ch.set_permissions(everyone, connect=None, speak=None)
+                    await channel.set_permissions(everyone, connect=None, speak=None)
 
-            await ch.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
-            await ctx.send(f"🔓 {ch.mention} wurde automatisch entsperrt.")
-            lock_tasks.pop(ch.id, None)
+            await channel.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
+            await ctx.send(f"🔓 {channel.mention} wurde automatisch entsperrt.")
+            lock_tasks.pop(channel.id, None)
 
-        task = bot.loop.create_task(_do_lock(channel, delay, duration))
-        lock_tasks[channel.id] = task
-        await ctx.send(f"⏰ {channel.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt.")
+        task = bot.loop.create_task(_do_lock(ch, delay, duration))
+        lock_tasks[ch.id] = task
+        await ctx.send(f"⏰ {ch.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt.")
 
 @bot.command(name="unlock")
 @commands.has_permissions(manage_channels=True)
-async def unlock(ctx, channels: Greedy[discord.abc.GuildChannel]):
+async def unlock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
     Hebbt Sperre sofort auf.
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
-
     everyone = ctx.guild.default_role
-    cfg = load_config()["guilds"].get(str(ctx.guild.id), {})
-    tmpl = cfg.get("templates", {}).get("unlock", 
-        "🔓 Kanal {channel} entsperrt."
-    )
 
-    for channel in channels:
-        if channel.id in lock_tasks:
-            lock_tasks[channel.id].cancel()
-            lock_tasks.pop(channel.id, None)
+    cfg = await get_guild_cfg(ctx.guild.id)
+    tmpl = cfg["templates"].get("unlock", "🔓 Kanal {channel} entsperrt.")
 
-        is_priv = channel.overwrites_for(everyone).view_channel is False
+    for ch in channels:
+        if ch.id in lock_tasks:
+            lock_tasks[ch.id].cancel()
+            lock_tasks.pop(ch.id, None)
+
+        is_priv = ch.overwrites_for(everyone).view_channel is False
         private_roles = []
         if is_priv:
-            for role_obj, over in channel.overwrites.items():
+            for role_obj, over in ch.overwrites.items():
                 if isinstance(role_obj, discord.Role) and over.view_channel:
                     private_roles.append(role_obj)
 
-        if isinstance(channel, discord.TextChannel):
+        if isinstance(ch, discord.TextChannel):
             if is_priv:
                 for r in private_roles:
-                    await channel.set_permissions(r, send_messages=None, view_channel=True)
+                    await ch.set_permissions(r, send_messages=None, view_channel=True)
             else:
-                await channel.set_permissions(everyone, send_messages=None)
+                await ch.set_permissions(everyone, send_messages=None)
         else:
             if is_priv:
                 for r in private_roles:
-                    await channel.set_permissions(r, connect=None, speak=None, view_channel=True)
+                    await ch.set_permissions(r, connect=None, speak=None, view_channel=True)
             else:
-                await channel.set_permissions(everyone, connect=None, speak=None)
+                await ch.set_permissions(everyone, connect=None, speak=None)
 
-        await channel.send(tmpl.format(channel=channel.mention, guild=ctx.guild.name))
+        await ch.send(tmpl.format(channel=ch.mention))
 
 # --- Welcome & Leave ------------------------------------------------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # 1) Hole die aktuelle Guild-Config
-    cfg = get_guild_cfg(after.guild.id)
-    role_id    = cfg.get("welcome_role")
-    channel_id = cfg.get("welcome_channel")
-    tmpl       = cfg.get("templates", {}).get("welcome")
-
-    # Debug: schreib ins Log, wer welche Rollen hat
-    print(f"[DEBUG] on_member_update: {after.name}, before={[r.id for r in before.roles]}, "
-          f"after={[r.id for r in after.roles]}, role_id={role_id}, channel_id={channel_id}")
-
-    # 2) Sind alle drei Werte konfiguriert?
+    cfg = await get_guild_cfg(after.guild.id)
+    role_id    = cfg["welcome_role"]
+    channel_id = cfg["welcome_channel"]
+    tmpl       = cfg["templates"].get("welcome")
     if not (role_id and channel_id and tmpl):
         return
-
-    # 3) Wurde die Rolle gerade erst hinzugefügt?
     had_before = any(r.id == role_id for r in before.roles)
     has_now    = any(r.id == role_id for r in after.roles)
     if had_before or not has_now:
         return
-
-    # 4) Finde Kanal
     channel = after.guild.get_channel(channel_id)
     if channel is None:
-        print(f"[WARN ] Kanal {channel_id} nicht gefunden")
+        return
+    text = tmpl.format(member=after.mention, guild=after.guild.name)
+    await channel.send(text)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    cfg = await get_guild_cfg(member.guild.id)
+    leave_chan = cfg["leave_channel"]
+    tmpl       = cfg["templates"].get("leave")
+    if not (leave_chan and tmpl):
         return
 
-    # 5) Baue und sende die Willkommensnachricht
+    # Kick- und Ban-Check
+    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    kicked = False
     try:
-        text = tmpl.format(
-            member=after.mention,
-            guild=after.guild.name
-        )
-    except Exception as e:
-        print(f"[ERROR] Welcome-Template konnte nicht formatiert werden: {e}")
+        async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+            if entry.target.id == member.id and (now - entry.created_at).total_seconds() < 5:
+                kicked = True
+            break
+    except discord.Forbidden:
+        pass
+    if kicked:
         return
+    try:
+        await member.guild.fetch_ban(member)
+        return
+    except (discord.NotFound, discord.Forbidden):
+        pass
 
+    channel = member.guild.get_channel(leave_chan)
+    text    = tmpl.format(member=member.mention, guild=member.guild.name)
     await channel.send(text)
 
 # --- Chat-Cleanup ---------------------------------------------------------
@@ -324,7 +344,7 @@ async def _purge_all(channel: discord.TextChannel):
 
 @bot.command(name="cleanup")
 @commands.has_permissions(manage_messages=True)
-async def cleanup(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, minutes: int):
+async def cleanup_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, minutes: int):
     """
     Wiederkehrende Löschung in Kanälen.
     Usage: !cleanup <#Kanal…> <Tage> <Minuten>
@@ -339,7 +359,6 @@ async def cleanup(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, mi
         f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} "
         f"werden alle {days} Tage und {minutes} Minuten gelöscht."
     )
-
     for ch in channels:
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
@@ -356,7 +375,7 @@ async def cleanup(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, mi
                 if pre is not None:
                     await asyncio.sleep(pre)
                     wm = (interval_s - pre) / 60
-                    text = f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)"
+                    text = (f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)")
                     await channel.send(f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
                     await asyncio.sleep(interval_s - pre)
                 else:
@@ -373,7 +392,7 @@ async def cleanup(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, mi
 
 @bot.command(name="cleanup_stop")
 @commands.has_permissions(manage_messages=True)
-async def cleanup_stop(ctx, channels: Greedy[discord.abc.GuildChannel]):
+async def cleanup_stop_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
     Stoppt die automatische Löschung.
     Usage: !cleanup_stop <#Kanal…>
