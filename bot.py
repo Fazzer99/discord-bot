@@ -44,21 +44,10 @@ async def get_guild_cfg(guild_id: int) -> dict:
         if isinstance(tmpl, str):
             try:
                 d["templates"] = json.loads(tmpl)
-            except:
+            except json.JSONDecodeError:
                 d["templates"] = {}
         elif tmpl is None:
             d["templates"] = {}
-
-        # Override- und Target-Rollen als Liste sicherstellen
-        for key in ("override_roles", "target_roles"):
-            val = d.get(key)
-            if isinstance(val, str):
-                try:
-                    d[key] = json.loads(val)
-                except:
-                    d[key] = []
-            elif val is None:
-                d[key] = []
 
         return d
 
@@ -81,7 +70,7 @@ async def update_guild_cfg(guild_id: int, **fields):
     vals = [guild_id]
     for v in fields.values():
         # JSONB-Feld: dict -> JSON-String
-        if isinstance(v, (dict, list)):
+        if isinstance(v, dict):
             vals.append(json.dumps(v))
         else:
             vals.append(v)
