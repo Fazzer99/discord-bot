@@ -255,6 +255,48 @@ async def setup(ctx, module: str):
 
     await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
 
+# --- Disable Module -------------------------------------------------------
+@bot.command(name="disable")
+@commands.has_permissions(manage_guild=True)
+async def disable(ctx, module: str):
+    """
+    Deaktiviert ein einmal eingerichtetes Modul und entfernt alle zugehörigen Daten.
+    Usage: !disable <welcome|leave|vc_override>
+    """
+    module = module.lower()
+    if module not in ("welcome", "leave", "vc_override"):
+        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`.")
+
+    guild_id = ctx.guild.id
+
+    if module in ("welcome", "leave"):
+        # Lade aktuelle Konfiguration
+        cfg = await get_guild_cfg(guild_id)
+        # Entferne channel, role und template für welcome bzw. leave
+        fields = {}
+        if module == "welcome":
+            fields["welcome_channel"] = None
+            fields["welcome_role"]    = None
+        else:
+            fields["leave_channel"]   = None
+
+        # Template aus dem JSONB-Feld kicken
+        templates = cfg.get("templates", {}).copy()
+        templates.pop(module, None)
+        fields["templates"] = templates
+
+        # Update in DB
+        await update_guild_cfg(guild_id, **fields)
+        await ctx.send(f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.")
+
+    else:  # vc_override
+        # Alle Overrides für diese Guild entfernen
+        await db_pool.execute(
+            "DELETE FROM vc_overrides WHERE guild_id = $1",
+            guild_id
+        )
+        await ctx.send("🗑️ Modul **vc_override** wurde deaktiviert. Alle Channel-Overrides gelöscht.")
+
 # --- Lock / Unlock --------------------------------------------------------
 lock_tasks: dict[int, asyncio.Task] = {}
 
