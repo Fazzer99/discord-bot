@@ -692,6 +692,10 @@ async def on_guild_join(guild: discord.Guild):
         "  – Danach fragt der Bot nacheinander:\n"
         "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
         "    2. **Ziel-Rollen** erwähnen, die bei Beitritt einer Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels erhalten\n"
+        "• `!disable <module>`\n"
+        "  – Deaktiviert ein eingerichtetes Modul und entfernt dazu alle gespeicherten Einstellungen:\n"
+        "    – `!disable welcome` oder `!disable leave`\n"
+        "    – `!disable vc_override [#VoiceChannel...]` (optional List von Channels)\n\n"
     )
 
     part2 = (
