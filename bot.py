@@ -551,6 +551,11 @@ async def on_guild_join(guild: discord.Guild):
         "    1. Kanal erwähnen (z.B. `#goodbye`)\n"
         "    2. Abschiedstext eingeben. Platzhalter wie oben\n"
         "    Beispiel: `{member} hat uns verlassen… Wir werden dich vermissen! 💔`"
+        "\n\n"
++        "• `!setup vc_override`\n"
++        "  – Danach fragt der Bot nacheinander:\n"
++        "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
++        "    2. **Ziel-Rollen** erwähnen, denen bei Betreten durch eine Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels gewährt wird\n"
     )
 
     part2 = (
