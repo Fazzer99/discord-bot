@@ -110,6 +110,12 @@ async def on_ready():
               target_roles    JSONB    DEFAULT '[]'::jsonb
             );
         """)
+        # Spalten für unseren VC-Override anlegen, falls sie noch fehlen
+        await db_pool.execute("""
+            ALTER TABLE guild_settings
+              ADD COLUMN IF NOT EXISTS override_roles JSONB DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS target_roles   JSONB DEFAULT '[]'::jsonb;
+        """)
     print(f"✅ Bot ist ready als {bot.user} und DB-Pool initialisiert")
 
 # --- Error Handler --------------------------------------------------------
