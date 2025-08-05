@@ -26,27 +26,30 @@ intents.members         = True  # für Member-Events benötigt
 bot       = commands.Bot(command_prefix="!", intents=intents)
 db_pool: asyncpg.Pool | None = None
 
+import json  # ganz oben in der Datei bereits importieren
+
 # --- Guild-DB-Helpers -----------------------------------------------------
 async def get_guild_cfg(guild_id: int) -> dict:
-    """
-    Lädt oder initialisiert die Zeile für guild_id.
-    Gibt ein dict mit allen Spalten zurück, z.B.
-    {
-      "guild_id":      123456789012345678,
-      "welcome_channel": 987654321098765432,
-      "welcome_role":    876543210987654321,
-      "leave_channel":   765432109876543210,
-      "templates":       {...}
-    }
-    """
+    """Lädt oder initialisiert die Zeile für guild_id."""
     row = await db_pool.fetchrow(
         "SELECT * FROM guild_settings WHERE guild_id = $1",
         guild_id
     )
     if row:
-        return dict(row)
+        # row kommt als Record, wandeln wir in ein normales dict
+        d = dict(row)
+        # und stellen sicher, dass templates immer ein dict ist
+        tmpl = d.get("templates")
+        if isinstance(tmpl, str):
+            try:
+                d["templates"] = json.loads(tmpl)
+            except json.JSONDecodeError:
+                d["templates"] = {}
+        elif tmpl is None:
+            d["templates"] = {}
+        return d
 
-    # falls noch nicht vorhanden, lege einen Eintrag an
+    # existiert noch nicht, also neu anlegen
     await db_pool.execute(
         "INSERT INTO guild_settings (guild_id) VALUES ($1)",
         guild_id
@@ -56,29 +59,26 @@ async def get_guild_cfg(guild_id: int) -> dict:
 
 async def update_guild_cfg(guild_id: int, **fields):
     """
-    Schreibt die übergebenen Felder in die DB:
-      • bei Konflikt auf guild_id wird die Zeile aktualisiert.
-    Beispiel:
-      await update_guild_cfg(123, welcome_channel=111, templates={'welcome': '...'})
+    Schreibt einzelne Felder zurück in die DB.
+    Beispiel-Aufruf:
+      await update_guild_cfg(gid, welcome_channel=123, templates={"welcome": "..."} )
     """
-    # 1) Spaltennamen und Platzhalterlisten erstellen
-    cols         = list(fields.keys())
-    placeholders = [f"${i+2}" for i in range(len(cols))]
-    assignments  = ", ".join(f"{col} = {ph}" for col, ph in zip(cols, placeholders))
+    # Baue SET-Klausel mit den richtigen Platzhaltern
+    cols = ", ".join(f"{col} = ${i+2}" for i, col in enumerate(fields))
+    # Werte-Liste mit guild_id an erster Stelle
+    vals = [guild_id]
+    for v in fields.values():
+        # JSONB-Feld: dict -> JSON-String
+        if isinstance(v, dict):
+            vals.append(json.dumps(v))
+        else:
+            vals.append(v)
 
-    # 2) INSERT ... ON CONFLICT … DO UPDATE
-    sql = f"""
-      INSERT INTO guild_settings (guild_id, {', '.join(cols)})
-      VALUES ($1, {', '.join(placeholders)})
-      ON CONFLICT (guild_id) DO
-        UPDATE SET {assignments};
-    """
-
-    # 3) Parameterliste zusammenstellen: [guild_id, *fields.values()]
-    params = [guild_id, *fields.values()]
-
-    # 4) Ausführen
-    await db_pool.execute(sql, *params)
+    # Führe das Update aus
+    await db_pool.execute(
+        f"UPDATE guild_settings SET {cols} WHERE guild_id = $1",
+        *vals
+    )
 
 # --- Startup --------------------------------------------------------------
 @bot.event
