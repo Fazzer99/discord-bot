@@ -28,25 +28,57 @@ db_pool: asyncpg.Pool | None = None
 
 # --- Guild-DB-Helpers -----------------------------------------------------
 async def get_guild_cfg(guild_id: int) -> dict:
-    """Lädt oder initialisiert die Zeile für guild_id."""
+    """
+    Lädt oder initialisiert die Zeile für guild_id.
+    Gibt ein dict mit allen Spalten zurück, z.B.
+    {
+      "guild_id":      123456789012345678,
+      "welcome_channel": 987654321098765432,
+      "welcome_role":    876543210987654321,
+      "leave_channel":   765432109876543210,
+      "templates":       {...}
+    }
+    """
     row = await db_pool.fetchrow(
-        "SELECT * FROM guild_settings WHERE guild_id = $1", guild_id
+        "SELECT * FROM guild_settings WHERE guild_id = $1",
+        guild_id
     )
     if row:
         return dict(row)
-    # neu anlegen
+
+    # falls noch nicht vorhanden, lege einen Eintrag an
     await db_pool.execute(
-        "INSERT INTO guild_settings (guild_id) VALUES ($1)", guild_id
+        "INSERT INTO guild_settings (guild_id) VALUES ($1)",
+        guild_id
     )
     return await get_guild_cfg(guild_id)
 
+
 async def update_guild_cfg(guild_id: int, **fields):
-    """Schreibt einzelne Felder zurück in die DB."""
-    cols = ", ".join(f"{k}= $${i+2}" for i, k in enumerate(fields))
-    vals = [guild_id] + list(fields.values())
-    await db_pool.execute(
-        f"UPDATE guild_settings SET {cols} WHERE guild_id = $1", *vals
-    )
+    """
+    Schreibt die übergebenen Felder in die DB:
+      • bei Konflikt auf guild_id wird die Zeile aktualisiert.
+    Beispiel:
+      await update_guild_cfg(123, welcome_channel=111, templates={'welcome': '...'})
+    """
+    # 1) Spaltennamen und Platzhalterlisten erstellen
+    cols         = list(fields.keys())
+    placeholders = [f"${i+2}" for i in range(len(cols))]
+    assignments  = ", ".join(f"{col} = {ph}" for col, ph in zip(cols, placeholders))
+
+    # 2) INSERT ... ON CONFLICT … DO UPDATE
+    sql = f"""
+      INSERT INTO guild_settings (guild_id, {', '.join(cols)})
+      VALUES ($1, {', '.join(placeholders)})
+      ON CONFLICT (guild_id) DO
+        UPDATE SET {assignments};
+    """
+
+    # 3) Parameterliste zusammenstellen: [guild_id, *fields.values()]
+    params = [guild_id, *fields.values()]
+
+    # 4) Ausführen
+    await db_pool.execute(sql, *params)
 
 # --- Startup --------------------------------------------------------------
 @bot.event
