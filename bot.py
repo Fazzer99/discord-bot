@@ -98,7 +98,8 @@ async def on_ready():
     global db_pool
     if db_pool is None:
         db_pool = await asyncpg.create_pool(dsn=DB_URL)
-        # Tabelle anlegen, falls nicht vorhanden
+
+        # 1) guild_settings-Tabelle (inkl. override_roles/target_roles als Fallback)
         await db_pool.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
               guild_id        BIGINT PRIMARY KEY,
@@ -106,16 +107,28 @@ async def on_ready():
               welcome_role    BIGINT,
               leave_channel   BIGINT,
               templates       JSONB DEFAULT '{}'::jsonb,
-              override_roles  JSONB    DEFAULT '[]'::jsonb,
-              target_roles    JSONB    DEFAULT '[]'::jsonb
+              override_roles  JSONB DEFAULT '[]'::jsonb,
+              target_roles    JSONB DEFAULT '[]'::jsonb
             );
         """)
-        # Spalten für unseren VC-Override anlegen, falls sie noch fehlen
+        # Falls aus irgendeinem Grund die Spalten noch nicht da sind
         await db_pool.execute("""
             ALTER TABLE guild_settings
               ADD COLUMN IF NOT EXISTS override_roles JSONB DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS target_roles   JSONB DEFAULT '[]'::jsonb;
         """)
+
+        # 2) Neue vc_overrides-Tabelle für pro-Channel-Overrides
+        await db_pool.execute("""
+            CREATE TABLE IF NOT EXISTS vc_overrides (
+              guild_id       BIGINT    NOT NULL,
+              channel_id     BIGINT    NOT NULL,
+              override_roles JSONB     DEFAULT '[]'::jsonb,
+              target_roles   JSONB     DEFAULT '[]'::jsonb,
+              PRIMARY KEY (guild_id, channel_id)
+            );
+        """)
+
     print(f"✅ Bot ist ready als {bot.user} und DB-Pool initialisiert")
 
 # --- Error Handler --------------------------------------------------------
@@ -142,10 +155,24 @@ async def setup(ctx, module: str):
     if module not in ("welcome", "leave", "vc_override"):
         return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`.")
 
-    # ─── vc_override-Setup: Override- und Ziel-Rollen abfragen und speichern ────
+    # ─── vc_override-Setup: Kanal + Override- und Ziel-Rollen abfragen und speichern ────
     if module == "vc_override":
-        # 1) Override-Rollen
-        await ctx.send("❓ Bitte erwähne **Override-Rollen** (z.B. @Admin @Moderator).")
+        # 1) Sprachkanal abfragen
+        await ctx.send("❓ Bitte erwähne den **Sprachkanal**, für den das Override gelten soll.")
+        def check_chan(m: discord.Message):
+            return (
+                m.author == ctx.author
+                and m.channel == ctx.channel
+                and m.channel_mentions
+            )
+        try:
+            msg_chan = await bot.wait_for("message", check=check_chan, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+        vc_channel = msg_chan.channel_mentions[0]
+
+        # 2) Override-Rollen abfragen
+        await ctx.send("❓ Bitte erwähne **Override-Rollen** (z.B. `@Admin @Moderator`).")
         def check_override(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
@@ -153,10 +180,9 @@ async def setup(ctx, module: str):
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         override_ids = [r.id for r in msg_o.role_mentions]
-        await update_guild_cfg(ctx.guild.id, override_roles=override_ids)
 
-        # 2) Ziel-Rollen
-        await ctx.send("❓ Bitte erwähne **Ziel-Rollen**, die Zugang erhalten sollen.")
+        # 3) Ziel-Rollen abfragen
+        await ctx.send("❓ Bitte erwähne **Ziel-Rollen**, die automatisch Zugriff erhalten sollen.")
         def check_target(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
@@ -164,9 +190,26 @@ async def setup(ctx, module: str):
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         target_ids = [r.id for r in msg_t.role_mentions]
-        await update_guild_cfg(ctx.guild.id, target_roles=target_ids)
 
-        return await ctx.send("🎉 **vc_override**-Setup abgeschlossen! Override- und Ziel-Rollen gespeichert.")
+        # 4) In vc_overrides-Tabelle upserten
+        await db_pool.execute(
+            """
+            INSERT INTO vc_overrides (guild_id, channel_id, override_roles, target_roles)
+            VALUES ($1, $2, $3::jsonb, $4::jsonb)
+            ON CONFLICT (guild_id, channel_id) DO UPDATE
+              SET override_roles = EXCLUDED.override_roles,
+                  target_roles   = EXCLUDED.target_roles;
+            """,
+            ctx.guild.id,
+            vc_channel.id,
+            json.dumps(override_ids),
+            json.dumps(target_ids),
+        )
+
+        return await ctx.send(
+            f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\n"
+            "Override-Rollen und Ziel-Rollen wurden gespeichert."
+        )
 
     # ─── Gemeinsames Setup: Kanal abfragen ────────────────────────────────────
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
@@ -496,37 +539,59 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     joined = before.channel is None and after.channel is not None
     left   = before.channel is not None and after.channel is None
 
-    cfg          = await get_guild_cfg(member.guild.id)
-    override_ids = cfg.get("override_roles", [])
-    target_ids   = cfg.get("target_roles", [])
-
-    # noch nicht konfiguriert?
-    if not override_ids or not target_ids:
+    # 1️⃣ Nur weiter, wenn wirklich in einen Sprachkanal ein-/ausgetreten wird
+    if not (joined or left):
         return
 
-    # hat der Member eine Override-Rolle?
+    # Bestimme die betroffene Kanal-ID
+    vc_channel = after.channel or before.channel
+    if vc_channel is None:
+        return
+
+    # 2️⃣ Lade Override-Config für genau diesen Kanal
+    row = await db_pool.fetchrow(
+        """
+        SELECT override_roles, target_roles
+        FROM vc_overrides
+        WHERE guild_id = $1 AND channel_id = $2
+        """,
+        member.guild.id,
+        vc_channel.id
+    )
+    if not row:
+        return  # für diesen Kanal kein Override eingerichtet
+
+    override_ids = row["override_roles"] or []
+    target_ids   = row["target_roles"]   or []
+
+    # 3️⃣ Prüfe, ob der Member eine der Override-Rollen hat
     has_override = any(r.id in override_ids for r in member.roles)
-
-    # Beitritt eines Override-Users → für alle target_roles connect erlauben
-    if joined and has_override:
-        vc = after.channel
-        for rid in target_ids:
-            role = member.guild.get_role(rid)
-            if role:
-                await vc.set_permissions(role, connect=True)
+    if not has_override:
         return
 
-    # Verlassen eines Override-Users → falls der letzte, für alle target_roles wieder sperren
-    if left and has_override:
-        vc = before.channel
-        # sind noch andere Override-Users drin?
-        still = [m for m in vc.members if any(r.id in override_ids for r in m.roles)]
-        if still:
-            return
+    # 4️⃣ Wenn ein Override-User beitritt → Ziel-Rollen freigeben
+    if joined:
         for rid in target_ids:
             role = member.guild.get_role(rid)
             if role:
-                await vc.set_permissions(role, connect=False)
+                await vc_channel.set_permissions(role, connect=True)
+        return
+
+    # 5️⃣ Wenn ein Override-User verlässt → prüfen, ob noch weitere drin sind
+    if left:
+        # Sind noch andere Override-User im Channel?
+        still = [
+            m for m in vc_channel.members
+            if any(r.id in override_ids for r in m.roles)
+        ]
+        if still:
+            return  # noch Override-User da → nicht sperren
+
+        # Kein Override-User mehr → Ziel-Rollen wieder sperren
+        for rid in target_ids:
+            role = member.guild.get_role(rid)
+            if role:
+                await vc_channel.set_permissions(role, connect=False)
         return
 
 # --- Guild Join Event -----------------------------------------------------
