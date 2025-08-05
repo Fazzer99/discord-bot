@@ -528,28 +528,43 @@ async def cleanup_stop_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
 # ─── Voice-Override: wenn Override-Rollen eintreten/verlassen ──────────────
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    # 1) Nur fortfahren, wenn wirklich ein Join oder Leave vorliegt
+    # 1) Exit early, wenn kein Join oder Leave
     joined = before.channel is None and after.channel is not None
     left   = before.channel is not None and after.channel is None
     if not (joined or left):
         return
 
-    # 2) Hole die Override- und Target-Listen aus guild_settings
-    cfg = await get_guild_cfg(member.guild.id)
-    override_ids = cfg.get("override_roles", [])
-    target_ids   = cfg.get("target_roles", [])
-    if not override_ids or not target_ids:
-        return  # noch nichts konfiguriert
+    # 2) Bestimme den betroffenen Voice-Channel
+    vc = after.channel if joined else before.channel
+    if vc is None:
+        return
 
-    # 3) Prüfen, ob der Member eine Override-Rolle hat
+    # 3) Lade Override- und Target-Listen aus vc_overrides
+    row = await db_pool.fetchrow(
+        """
+        SELECT override_roles, target_roles
+          FROM vc_overrides
+         WHERE guild_id = $1
+           AND channel_id = $2
+        """,
+        member.guild.id,
+        vc.id
+    )
+    if not row:
+        return  # für diesen Kanal kein Override konfiguriert
+
+    # row kommt als JSONB, decode in Python-Listen
+    override_ids = row["override_roles"] or []
+    target_ids   = row["target_roles"]   or []
+    if not override_ids or not target_ids:
+        return
+
+    # 4) Prüfen, ob der Member eine Override-Rolle hat
     has_override = any(r.id in override_ids for r in member.roles)
     if not has_override:
         return
 
-    # 4) Bestimme den betroffenen Voice-Channel
-    vc = after.channel if joined else before.channel
-
-    # 5) Wenn ein Override-User beitritt → allen Target-Rollen CONNECT erlauben
+    # 5) Beitritt eines Override-Users → allen Target-Rollen CONNECT erlauben
     if joined:
         for rid in target_ids:
             role = member.guild.get_role(rid)
@@ -557,9 +572,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 await vc.set_permissions(role, connect=True)
         return
 
-    # 6) Wenn ein Override-User verlässt → nur sperren, wenn es der letzte Override-User war
+    # 6) Verlassen eines Override-Users → nur sperren, wenn er der letzte war
     if left:
-        # Prüfen, ob noch andere Override-User im Channel sind
         still_override_inside = any(
             any(r.id in override_ids for r in m.roles)
             for m in vc.members
@@ -567,7 +581,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         if still_override_inside:
             return
 
-        # Kein Override-User mehr – Target-Rollen wieder sperren
         for rid in target_ids:
             role = member.guild.get_role(rid)
             if role:
