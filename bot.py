@@ -111,6 +111,7 @@ async def on_command_error(ctx, error):
         raise error
 
 # --- Setup Wizard ---------------------------------------------------------
+# --- Setup Wizard ---------------------------------------------------------
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
@@ -122,7 +123,7 @@ async def setup(ctx, module: str):
     if module not in ("welcome", "leave"):
         return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`.")
 
-    # 1️⃣ Lade die bestehenden Einstellungen aus der DB
+    # 1️⃣ Hole die aktuellen Einstellungen aus der DB
     cfg = await get_guild_cfg(ctx.guild.id)
 
     # 2️⃣ Kanal abfragen
@@ -138,10 +139,9 @@ async def setup(ctx, module: str):
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
     channel = msg.channel_mentions[0]
-    # speichere sofort in der DB
     await update_guild_cfg(ctx.guild.id, **{f"{module}_channel": channel.id})
 
-    # 3️⃣ Für welcome zusätzlich die Trigger-Rolle abfragen
+    # 3️⃣ Bei welcome: zusätzlich die Trigger-Rolle abfragen
     if module == "welcome":
         await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
         def check_role(m: discord.Message):
@@ -175,14 +175,22 @@ async def setup(ctx, module: str):
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
 
-    # 5️⃣ Templates-Dict aus DB aktualisieren
-    #    Stelle sicher, dass wir ein dict haben, nicht einen String!
-    current_templates = cfg.get("templates") or {}
+    # 5️⃣ Aktuelles Templates‐Feld aus cfg holen und zu Dict machen
+    raw = cfg.get("templates")
+    if isinstance(raw, str):
+        try:
+            current_templates = json.loads(raw)
+        except json.JSONDecodeError:
+            current_templates = {}
+    else:
+        current_templates = raw.copy() if isinstance(raw, dict) else {}
+
+    # neuen Eintrag setzen
     current_templates[module] = msg2.content
+    # zurück in die DB schreiben
     await update_guild_cfg(ctx.guild.id, templates=current_templates)
 
-    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
-
+    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")    
 # --- Lock / Unlock --------------------------------------------------------
 lock_tasks: dict[int, asyncio.Task] = {}
 
