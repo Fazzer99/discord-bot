@@ -484,6 +484,45 @@ async def cleanup_stop_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
         else:
             await ctx.send(f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
 
+# ─── Voice-Override: wenn Override-Rollen eintreten/verlassen ──────────────
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    joined = before.channel is None and after.channel is not None
+    left   = before.channel is not None and after.channel is None
+
+    cfg          = await get_guild_cfg(member.guild.id)
+    override_ids = cfg.get("override_roles", [])
+    target_ids   = cfg.get("target_roles", [])
+
+    # noch nicht konfiguriert?
+    if not override_ids or not target_ids:
+        return
+
+    # hat der Member eine Override-Rolle?
+    has_override = any(r.id in override_ids for r in member.roles)
+
+    # Beitritt eines Override-Users → für alle target_roles connect erlauben
+    if joined and has_override:
+        vc = after.channel
+        for rid in target_ids:
+            role = member.guild.get_role(rid)
+            if role:
+                await vc.set_permissions(role, connect=True)
+        return
+
+    # Verlassen eines Override-Users → falls der letzte, für alle target_roles wieder sperren
+    if left and has_override:
+        vc = before.channel
+        # sind noch andere Override-Users drin?
+        still = [m for m in vc.members if any(r.id in override_ids for r in m.roles)]
+        if still:
+            return
+        for rid in target_ids:
+            role = member.guild.get_role(rid)
+            if role:
+                await vc.set_permissions(role, connect=False)
+        return
+
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
 async def on_guild_join(guild: discord.Guild):
