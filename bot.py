@@ -535,7 +535,7 @@ async def on_guild_join(guild: discord.Guild):
     # 1️⃣ Lege einen neuen Textkanal für die Bot-Anleitung an
     try:
         info_channel = await guild.create_text_channel(
-            name="bot-setup",
+            name="fazzer´s bot-setup",
             reason="Bot-Beitritt: Einrichtungs- und Info-Kanal erstellen"
         )
     except discord.Forbidden:
