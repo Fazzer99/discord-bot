@@ -258,10 +258,15 @@ async def setup(ctx, module: str):
 # --- Disable Module -------------------------------------------------------
 @bot.command(name="disable")
 @commands.has_permissions(manage_guild=True)
-async def disable(ctx, module: str):
+async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
     """
-    Deaktiviert ein einmal eingerichtetes Modul und entfernt alle zugehörigen Daten.
-    Usage: !disable <welcome|leave|vc_override>
+    Deaktiviert ein Modul und entfernt alle zugehörigen Daten.
+    Usage:
+      • !disable welcome
+      • !disable leave
+      • !disable vc_override [#VoiceChannel1 …]
+    Wenn Du bei vc_override Kanäle angibst, werden nur für diese Overrides entfernt,
+    sonst für alle Channels der Guild.
     """
     module = module.lower()
     if module not in ("welcome", "leave", "vc_override"):
@@ -281,21 +286,34 @@ async def disable(ctx, module: str):
             fields["leave_channel"]   = None
 
         # Template aus dem JSONB-Feld kicken
-        templates = cfg.get("templates", {}).copy()
-        templates.pop(module, None)
-        fields["templates"] = templates
+        tpl = cfg.get("templates", {}).copy()
+        tpl.pop(module, None)
+        fields["templates"] = tpl
 
         # Update in DB
         await update_guild_cfg(guild_id, **fields)
-        await ctx.send(f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.")
+        return await ctx.send(f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.")
 
-    else:  # vc_override
-        # Alle Overrides für diese Guild entfernen
-        await db_pool.execute(
-            "DELETE FROM vc_overrides WHERE guild_id = $1",
-            guild_id
+    # vc_override
+    # wenn Channels angegeben: nur für diese löschen
+    if channels:
+        removed = []
+        for ch in channels:
+            await db_pool.execute(
+                "DELETE FROM vc_overrides WHERE guild_id = $1 AND channel_id = $2",
+                guild_id, ch.id
+            )
+            removed.append(ch.mention)
+        return await ctx.send(
+            f"🗑️ vc_override-Overrides für {' ,'.join(removed)} wurden entfernt."
         )
-        await ctx.send("🗑️ Modul **vc_override** wurde deaktiviert. Alle Channel-Overrides gelöscht.")
+
+    # keine Channels angegeben → alles löschen
+    await db_pool.execute(
+        "DELETE FROM vc_overrides WHERE guild_id = $1",
+        guild_id
+    )
+    await ctx.send("🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.")
 
 # --- Lock / Unlock --------------------------------------------------------
 lock_tasks: dict[int, asyncio.Task] = {}
