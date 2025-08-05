@@ -36,10 +36,10 @@ async def get_guild_cfg(guild_id: int) -> dict:
         guild_id
     )
     if row:
-        # Record → dict
+        # Record → normales dict
         d = dict(row)
 
-        # Templates als dict sicherstellen
+        # templates immer als dict
         tmpl = d.get("templates")
         if isinstance(tmpl, str):
             try:
@@ -49,33 +49,44 @@ async def get_guild_cfg(guild_id: int) -> dict:
         elif tmpl is None:
             d["templates"] = {}
 
+        # override_roles & target_roles immer als Liste
+        for key in ("override_roles", "target_roles"):
+            val = d.get(key)
+            if isinstance(val, str):
+                try:
+                    d[key] = json.loads(val)
+                except json.JSONDecodeError:
+                    d[key] = []
+            elif val is None:
+                d[key] = []
+
         return d
 
-    # Neu anlegen, wenn noch nicht vorhanden
+    # Zeile existiert noch nicht → neu anlegen
     await db_pool.execute(
         "INSERT INTO guild_settings (guild_id) VALUES ($1)",
         guild_id
     )
     return await get_guild_cfg(guild_id)
 
+
 async def update_guild_cfg(guild_id: int, **fields):
     """
     Schreibt einzelne Felder zurück in die DB.
-    Beispiel-Aufruf:
-      await update_guild_cfg(gid, welcome_channel=123, templates={"welcome": "..."} )
+    Beispiel:
+      await update_guild_cfg(gid, welcome_channel=123, templates={"welcome": "..."})
     """
-    # Baue SET-Klausel mit den richtigen Platzhaltern
+    # SET-Klausel mit Platzhaltern $2, $3, …
     cols = ", ".join(f"{col} = ${i+2}" for i, col in enumerate(fields))
-    # Werte-Liste mit guild_id an erster Stelle
+    # Werte-Liste: zuerst guild_id, dann alle fields
     vals = [guild_id]
     for v in fields.values():
-        # JSONB-Feld: dict -> JSON-String
-        if isinstance(v, dict):
+        # JSONB-Feld (dict oder list) → JSON-String
+        if isinstance(v, (dict, list)):
             vals.append(json.dumps(v))
         else:
             vals.append(v)
 
-    # Führe das Update aus
     await db_pool.execute(
         f"UPDATE guild_settings SET {cols} WHERE guild_id = $1",
         *vals
