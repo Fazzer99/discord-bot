@@ -122,24 +122,34 @@ async def setup(ctx, module: str):
     if module not in ("welcome", "leave"):
         return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`.")
 
+    # 1️⃣ Lade die bestehenden Einstellungen aus der DB
     cfg = await get_guild_cfg(ctx.guild.id)
 
-    # 1) Kanal abfragen
+    # 2️⃣ Kanal abfragen
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
     def check_chan(m: discord.Message):
-        return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
+        return (
+            m.author == ctx.author
+            and m.channel == ctx.channel
+            and m.channel_mentions
+        )
     try:
         msg = await bot.wait_for("message", check=check_chan, timeout=60)
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
     channel = msg.channel_mentions[0]
+    # speichere sofort in der DB
     await update_guild_cfg(ctx.guild.id, **{f"{module}_channel": channel.id})
 
-    # für welcome: Rolle abfragen
+    # 3️⃣ Für welcome zusätzlich die Trigger-Rolle abfragen
     if module == "welcome":
         await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
         def check_role(m: discord.Message):
-            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+            return (
+                m.author == ctx.author
+                and m.channel == ctx.channel
+                and m.role_mentions
+            )
         try:
             msgr = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
@@ -147,25 +157,29 @@ async def setup(ctx, module: str):
         role = msgr.role_mentions[0]
         await update_guild_cfg(ctx.guild.id, welcome_role=role.id)
 
-    # 2) Template abfragen
-    lines = [
-        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.",
-        "Verwende Platzhalter:",
-        "`{member}` → Member-Mention",
+    # 4️⃣ Template abfragen
+    await ctx.send(
+        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
+        "Verwende Platzhalter:\n"
+        "`{member}` → Member-Mention\n"
         "`{guild}`  → Server-Name"
-    ]
-    await ctx.send("\n".join(lines))
-
+    )
     def check_txt(m: discord.Message):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
+        return (
+            m.author == ctx.author
+            and m.channel == ctx.channel
+            and m.content.strip()
+        )
     try:
         msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
     except asyncio.TimeoutError:
         return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
-    # templates JSON updaten
-    new_templates = (await get_guild_cfg(ctx.guild.id))["templates"]
-    new_templates[module] = msg2.content
-    await update_guild_cfg(ctx.guild.id, templates=new_templates)
+
+    # 5️⃣ Templates-Dict aus DB aktualisieren
+    #    Stelle sicher, dass wir ein dict haben, nicht einen String!
+    current_templates = cfg.get("templates") or {}
+    current_templates[module] = msg2.content
+    await update_guild_cfg(ctx.guild.id, templates=current_templates)
 
     await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
 
