@@ -36,26 +36,38 @@ async def get_guild_cfg(guild_id: int) -> dict:
         guild_id
     )
     if row:
-        # row kommt als Record, wandeln wir in ein normales dict
+        # Record → dict
         d = dict(row)
-        # und stellen sicher, dass templates immer ein dict ist
+
+        # Templates als dict sicherstellen
         tmpl = d.get("templates")
         if isinstance(tmpl, str):
             try:
                 d["templates"] = json.loads(tmpl)
-            except json.JSONDecodeError:
+            except:
                 d["templates"] = {}
         elif tmpl is None:
             d["templates"] = {}
+
+        # Override- und Target-Rollen als Liste sicherstellen
+        for key in ("override_roles", "target_roles"):
+            val = d.get(key)
+            if isinstance(val, str):
+                try:
+                    d[key] = json.loads(val)
+                except:
+                    d[key] = []
+            elif val is None:
+                d[key] = []
+
         return d
 
-    # existiert noch nicht, also neu anlegen
+    # Neu anlegen, wenn noch nicht vorhanden
     await db_pool.execute(
         "INSERT INTO guild_settings (guild_id) VALUES ($1)",
         guild_id
     )
     return await get_guild_cfg(guild_id)
-
 
 async def update_guild_cfg(guild_id: int, **fields):
     """
@@ -69,7 +81,7 @@ async def update_guild_cfg(guild_id: int, **fields):
     vals = [guild_id]
     for v in fields.values():
         # JSONB-Feld: dict -> JSON-String
-        if isinstance(v, dict):
+        if isinstance(v, (dict, list)):
             vals.append(json.dumps(v))
         else:
             vals.append(v)
@@ -93,7 +105,9 @@ async def on_ready():
               welcome_channel BIGINT,
               welcome_role    BIGINT,
               leave_channel   BIGINT,
-              templates       JSONB DEFAULT '{}'::jsonb
+              templates       JSONB DEFAULT '{}'::jsonb,
+              override_roles  JSONB    DEFAULT '[]'::jsonb,
+              target_roles    JSONB    DEFAULT '[]'::jsonb
             );
         """)
     print(f"✅ Bot ist ready als {bot.user} und DB-Pool initialisiert")
@@ -111,29 +125,47 @@ async def on_command_error(ctx, error):
         raise error
 
 # --- Setup Wizard ---------------------------------------------------------
-# --- Setup Wizard ---------------------------------------------------------
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
     """
     Interaktives Setup für Module:
-      welcome, leave
+      welcome, leave, vc_override
     """
     module = module.lower()
-    if module not in ("welcome", "leave"):
-        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`.")
+    if module not in ("welcome", "leave", "vc_override"):
+        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`.")
 
-    # 1️⃣ Hole die aktuellen Einstellungen aus der DB
-    cfg = await get_guild_cfg(ctx.guild.id)
+    # ─── vc_override-Setup: Override- und Ziel-Rollen abfragen und speichern ────
+    if module == "vc_override":
+        # 1) Override-Rollen
+        await ctx.send("❓ Bitte erwähne **Override-Rollen** (z.B. @Admin @Moderator).")
+        def check_override(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+        try:
+            msg_o = await bot.wait_for("message", check=check_override, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+        override_ids = [r.id for r in msg_o.role_mentions]
+        await update_guild_cfg(ctx.guild.id, override_roles=override_ids)
 
-    # 2️⃣ Kanal abfragen
+        # 2) Ziel-Rollen
+        await ctx.send("❓ Bitte erwähne **Ziel-Rollen**, die Zugang erhalten sollen.")
+        def check_target(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+        try:
+            msg_t = await bot.wait_for("message", check=check_target, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+        target_ids = [r.id for r in msg_t.role_mentions]
+        await update_guild_cfg(ctx.guild.id, target_roles=target_ids)
+
+        return await ctx.send("🎉 **vc_override**-Setup abgeschlossen! Override- und Ziel-Rollen gespeichert.")
+
+    # ─── Gemeinsames Setup: Kanal abfragen ────────────────────────────────────
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
     def check_chan(m: discord.Message):
-        return (
-            m.author == ctx.author
-            and m.channel == ctx.channel
-            and m.channel_mentions
-        )
+        return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
     try:
         msg = await bot.wait_for("message", check=check_chan, timeout=60)
     except asyncio.TimeoutError:
@@ -141,56 +173,47 @@ async def setup(ctx, module: str):
     channel = msg.channel_mentions[0]
     await update_guild_cfg(ctx.guild.id, **{f"{module}_channel": channel.id})
 
-    # 3️⃣ Bei welcome: zusätzlich die Trigger-Rolle abfragen
+    # ─── welcome: Trigger-Rolle abfragen ──────────────────────────────────────
     if module == "welcome":
-        await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht triggern soll.")
+        await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht auslöst.")
         def check_role(m: discord.Message):
-            return (
-                m.author == ctx.author
-                and m.channel == ctx.channel
-                and m.role_mentions
-            )
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msgr = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.")
-        role = msgr.role_mentions[0]
-        await update_guild_cfg(ctx.guild.id, welcome_role=role.id)
+        await update_guild_cfg(ctx.guild.id, welcome_role=msgr.role_mentions[0].id)
 
-    # 4️⃣ Template abfragen
-    await ctx.send(
-        f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
-        "Verwende Platzhalter:\n"
-        "`{member}` → Member-Mention\n"
-        "`{guild}`  → Server-Name"
-    )
-    def check_txt(m: discord.Message):
-        return (
-            m.author == ctx.author
-            and m.channel == ctx.channel
-            and m.content.strip()
+    # ─── welcome & leave: Template abfragen ───────────────────────────────────
+    if module in ("welcome", "leave"):
+        await ctx.send(
+            f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
+            "Verwende Platzhalter:\n"
+            "`{member}` → Member-Erwähnung\n"
+            "`{guild}`  → Server-Name"
         )
-    try:
-        msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
-    except asyncio.TimeoutError:
-        return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
-
-    # 5️⃣ Aktuelles Templates‐Feld aus cfg holen und zu Dict machen
-    raw = cfg.get("templates")
-    if isinstance(raw, str):
+        def check_txt(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
         try:
-            current_templates = json.loads(raw)
-        except json.JSONDecodeError:
-            current_templates = {}
-    else:
-        current_templates = raw.copy() if isinstance(raw, dict) else {}
+            msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
 
-    # neuen Eintrag setzen
-    current_templates[module] = msg2.content
-    # zurück in die DB schreiben
-    await update_guild_cfg(ctx.guild.id, templates=current_templates)
+        # Aktuelles Templates-Feld aus der DB laden und updaten
+        cfg = await get_guild_cfg(ctx.guild.id)
+        raw = cfg.get("templates") or {}
+        if isinstance(raw, str):
+            try:
+                current_templates = json.loads(raw)
+            except json.JSONDecodeError:
+                current_templates = {}
+        else:
+            current_templates = raw.copy()
+        current_templates[module] = msg2.content
+        await update_guild_cfg(ctx.guild.id, templates=current_templates)
 
-    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")    
+    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
+
 # --- Lock / Unlock --------------------------------------------------------
 lock_tasks: dict[int, asyncio.Task] = {}
 
