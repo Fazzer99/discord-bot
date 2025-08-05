@@ -106,16 +106,8 @@ async def on_ready():
               welcome_channel BIGINT,
               welcome_role    BIGINT,
               leave_channel   BIGINT,
-              templates       JSONB DEFAULT '{}'::jsonb,
-              override_roles  JSONB DEFAULT '[]'::jsonb,
-              target_roles    JSONB DEFAULT '[]'::jsonb
+              templates       JSONB DEFAULT '{}'::jsonb
             );
-        """)
-        # Falls aus irgendeinem Grund die Spalten noch nicht da sind
-        await db_pool.execute("""
-            ALTER TABLE guild_settings
-              ADD COLUMN IF NOT EXISTS override_roles JSONB DEFAULT '[]'::jsonb,
-              ADD COLUMN IF NOT EXISTS target_roles   JSONB DEFAULT '[]'::jsonb;
         """)
 
         # 2) Neue vc_overrides-Tabelle für pro-Channel-Overrides
