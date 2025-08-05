@@ -532,18 +532,23 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # Versuche, System-Channel oder erstes beschreibbares Text-Channel zu finden
-    target = guild.system_channel or next(
-        (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages),
-        None
-    )
-    if not target:
+    # 1️⃣ Lege einen neuen Textkanal für die Bot-Anleitung an
+    try:
+        info_channel = await guild.create_text_channel(
+            name="bot-setup",
+            reason="Bot-Beitritt: Einrichtungs- und Info-Kanal erstellen"
+        )
+    except discord.Forbidden:
+        # Falls wir keine Rechte zum Anlegen haben, fallback auf system_channel
+        info_channel = guild.system_channel
+    if info_channel is None:
         return
 
+    # 2️⃣ Baue die beiden Teile der Anleitung
     part1 = (
         f"👋 **Hallo {guild.name}!** Ich bin Dein neuer Bot – hier die ausführliche Anleitung:\n\n"
 
-        "**1️⃣ SETUP**\n"
+        "**1️⃣ SETUP-Module**\n"
         "• `!setup welcome`\n"
         "  – Danach fragt der Bot nacheinander:\n"
         "    1. Kanal erwähnen (z.B. `#welcome`)\n"
@@ -556,16 +561,15 @@ async def on_guild_join(guild: discord.Guild):
         "  – Danach fragt der Bot nacheinander:\n"
         "    1. Kanal erwähnen (z.B. `#goodbye`)\n"
         "    2. Abschiedstext eingeben. Platzhalter wie oben\n"
-        "    Beispiel: `{member} hat uns verlassen… Wir werden dich vermissen! 💔`"
-        "\n\n"
-+        "• `!setup vc_override`\n"
-+        "  – Danach fragt der Bot nacheinander:\n"
-+        "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
-+        "    2. **Ziel-Rollen** erwähnen, denen bei Betreten durch eine Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels gewährt wird\n"
+        "    Beispiel: `{member} hat uns verlassen… Wir werden dich vermissen! 💔`\n\n"
+        "• `!setup vc_override`\n"
+        "  – Danach fragt der Bot nacheinander:\n"
+        "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
+        "    2. **Ziel-Rollen** erwähnen, die bei Beitritt einer Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels erhalten\n"
     )
 
     part2 = (
-        "\n\n**2️⃣ KANÄLE SPERREN & ENTSPERREN**\n"
+        "**2️⃣ KANÄLE SPERREN & ENTSPERREN**\n"
         "• `!lock <#Kanal1> [#Kanal2 …] <HH:MM> <Minuten>`\n"
         "  – Mindestens einen Text- oder Voice-Kanal mentionen\n"
         "  – Uhrzeit im 24-h-Format (`HH:MM`), z.B. `21:30`\n"
@@ -584,6 +588,7 @@ async def on_guild_join(guild: discord.Guild):
 
         "**❗️ Benötigte Rechte**\n"
         "– `!setup`: **Manage Server**\n"
+        "– `!setup vc_override`: **Manage Server** (zum Speichern von Override-/Ziel-Rollen)\n"
         "– `!lock`/`!unlock`: **Manage Channels**\n"
         "– `!cleanup`/`!cleanup_stop`: **Manage Messages**\n\n"
 
@@ -592,12 +597,14 @@ async def on_guild_join(guild: discord.Guild):
         "2. Führe `!setup leave` aus und gib Dein Abschiedstemplate ein\n"
         "3. Teste `!lock` und `!cleanup`\n\n"
 
-        "ℹ️ Bitte lösche diese Nachricht, sobald Du fertig bist.\n"
+        "ℹ️ Bitte lösche diesen Kanal **NICHT**, sondern verschiebe ihn in Deinen **Admin-Bereich** "
+        "und synchronisiere dort die Kanal-Berechtigungen, sodass nur Admins ihn sehen können.\n"
         "Viel Spaß mit Deinem neuen Bot! 🚀"
     )
 
-    await target.send(part1)
-    await target.send(part2)
+    # 3️⃣ Sende die beiden Nachrichtenteile
+    await info_channel.send(part1)
+    await info_channel.send(part2)
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
