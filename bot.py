@@ -60,6 +60,9 @@ async def get_guild_cfg(guild_id: int) -> dict:
             elif val is None:
                 d[key] = []
 
+        # default_role sicherstellen (immer vorhanden, sonst None)
+        if "default_role" not in d or d["default_role"] is None:
+            d["default_role"] = None
         return d
 
     # Zeile existiert noch nicht → neu anlegen
@@ -99,7 +102,7 @@ async def on_ready():
     if db_pool is None:
         db_pool = await asyncpg.create_pool(dsn=DB_URL)
 
-        # 1) guild_settings-Tabelle (inkl. override_roles/target_roles als Fallback)
+        # 1) guild_settings-Tabelle
         await db_pool.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
               guild_id        BIGINT PRIMARY KEY,
@@ -726,10 +729,14 @@ async def on_guild_join(guild: discord.Guild):
         "  – Danach fragt der Bot nacheinander:\n"
         "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
         "    2. **Ziel-Rollen** erwähnen, die bei Beitritt einer Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels erhalten\n\n"
+        "• `!setup autorole`\n"
+        "  – Lege eine Standard-Rolle fest, die neuen Mitgliedern beim Betreten automatisch zugewiesen wird.\n"
+        "  – Du wirst nur noch gefragt: Rolle erwähnen (z.B. `@Member`)\n\n"
         "• `!disable <module>`\n"
         "  – Deaktiviert ein eingerichtetes Modul und entfernt dazu alle gespeicherten Einstellungen:\n"
         "    – `!disable welcome` oder `!disable leave`\n"
-        "    – `!disable vc_override [#VoiceChannel...]` (optional List von Channels)\n\n"
+        "    – `!disable vc_override [#VoiceChannel...]` (optional List von Channels)\n"
+        "    – `!disable autorole` entfernt die Auto-Role-Konfiguration\n\n"
     )
 
     part2 = (
