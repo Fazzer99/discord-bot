@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 import asyncpg
 from dotenv import load_dotenv
 import discord
-from discord import app_commands, Interaction
 from discord.ext import commands
+from discord.ext.commands import Greedy
 
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
@@ -23,10 +23,10 @@ if DB_URL is None:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members         = True  # für Member-Events benötigt
-# App-Command Bot (Slash-Commands), kein Prefix mehr
-from discord import Bot
-bot = Bot(intents=intents)
+bot       = commands.Bot(command_prefix="!", intents=intents)
 db_pool: asyncpg.Pool | None = None
+
+import json  # ganz oben in der Datei bereits importieren
 
 # --- Guild-DB-Helpers -----------------------------------------------------
 async def get_guild_cfg(guild_id: int) -> dict:
@@ -126,10 +126,6 @@ async def on_ready():
         """)
 
     print(f"✅ Bot ist ready als {bot.user} und DB-Pool initialisiert")
-    
-    # alle Slash-Commands bei Discord registrieren
-    await bot.tree.sync()
-    print("🔃 Slash-Commands sind synchronisiert.")
 
 # --- Error Handler --------------------------------------------------------
 @bot.event
@@ -547,18 +543,9 @@ async def _purge_all(channel: discord.TextChannel):
             await m.delete()
             await asyncio.sleep(1)
 
-@bot.tree.command(name="cleanup", description="Starte automatische Chat-Bereinigung")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def cleanup_slash(
-    interaction: Interaction,
-    channels: str,    # wir nehmen hier später Typ discord.TextChannel
-    days: int,
-    minutes: int
-):
-    await interaction.response.defer()
-    # parse channels aus ‚channels‘
-    # … hier kommt der Cleanup-Code rein, fast identisch zu vorher
-    await interaction.followup.send("🗑️ Deine Kanäle werden alle … gelöscht.")
+@bot.command(name="cleanup")
+@commands.has_permissions(manage_messages=True)
+async def cleanup_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], days: int, minutes: int):
     """
     Wiederkehrende Löschung in Kanälen.
     Usage: !cleanup <#Kanal…> <Tage> <Minuten>
