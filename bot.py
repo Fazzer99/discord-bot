@@ -652,16 +652,20 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return  # schlechte/fehlende Konfiguration
 
     # 5) Prüfen, ob der Member eine Override-Rolle hat
-    has_override = any(r.id in override_ids for r in member.roles)
-    if not has_override:
+    if not any(r.id in override_ids for r in member.roles):
         return
 
-    # 6) Bei Join: allen Ziel-Rollen CONNECT erlauben
+    # 6) Bei Join: allen Ziel-Rollen CONNECT erlauben, Sichtbarkeit übernehmen
     if joined:
         for rid in target_ids:
             role = member.guild.get_role(rid)
             if role:
-                await vc.set_permissions(role, connect=True)
+                over = vc.overwrites_for(role)
+                await vc.set_permissions(
+                    role,
+                    connect=True,
+                    view_channel=over.view_channel
+                )
         return
 
     # 7) Bei Leave: nur sperren, wenn letzte Override-Person gegangen ist
@@ -675,7 +679,12 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     for rid in target_ids:
         role = member.guild.get_role(rid)
         if role:
-            await vc.set_permissions(role, connect=False)
+            over = vc.overwrites_for(role)
+            await vc.set_permissions(
+                role,
+                connect=False,
+                view_channel=over.view_channel
+            )
     return
 
 # ─── Autorole: neuen Mitgliedern automatisch die default_role geben ─────
