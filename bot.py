@@ -106,6 +106,7 @@ async def on_ready():
               welcome_channel BIGINT,
               welcome_role    BIGINT,
               leave_channel   BIGINT,
+              default_role    BIGINT,
               templates       JSONB DEFAULT '{}'::jsonb
             );
         """)
@@ -144,8 +145,8 @@ async def setup(ctx, module: str):
       welcome, leave, vc_override
     """
     module = module.lower()
-    if module not in ("welcome", "leave", "vc_override"):
-        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`.")
+    if module not in ("welcome", "leave", "vc_override", "autorole"):
+        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`.")
 
     # ─── vc_override-Setup: Kanal + Override- und Ziel-Rollen abfragen und speichern ────
     if module == "vc_override":
@@ -202,6 +203,19 @@ async def setup(ctx, module: str):
             f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\n"
             "Override-Rollen und Ziel-Rollen wurden gespeichert."
         )
+
+    # ─── Autorole-Setup: Standard-Rolle abfragen und speichern ──────────────
+    if module == "autorole":
+        await ctx.send("❓ Bitte erwähne die Rolle, die neuen Mitgliedern automatisch zugewiesen werden soll.")
+        def check_role(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
+        try:
+            msg_r = await bot.wait_for("message", check=check_role, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup autorole` neu ausführen.")
+        autorole = msg_r.role_mentions[0]
+        await update_guild_cfg(ctx.guild.id, default_role=autorole.id)
+        return await ctx.send(f"🎉 **autorole**-Setup abgeschlossen! Neue Mitglieder bekommen die Rolle {autorole.mention}.")
 
     # ─── Gemeinsames Setup: Kanal abfragen ────────────────────────────────────
     await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
@@ -269,11 +283,17 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
     sonst für alle Channels der Guild.
     """
     module = module.lower()
-    if module not in ("welcome", "leave", "vc_override"):
-        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`.")
+    if module not in ("welcome", "leave", "vc_override", "autorole"):
+        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`.")
 
     guild_id = ctx.guild.id
 
+    # autorole deaktivieren
+    if module == "autorole":
+        await update_guild_cfg(guild_id, default_role=None)
+        return await ctx.send("🗑️ Modul **autorole** wurde deaktiviert. Keine Autorole mehr gesetzt.")
+
+    # welcome & leave: Channel und Role entfernen
     if module in ("welcome", "leave"):
         # Lade aktuelle Konfiguration
         cfg = await get_guild_cfg(guild_id)
@@ -654,6 +674,20 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         if role:
             await vc.set_permissions(role, connect=False)
     return
+
+# ─── Autorole: neuen Mitgliedern automatisch die default_role geben ─────
+@bot.event
+async def on_member_join(member: discord.Member):
+    cfg = await get_guild_cfg(member.guild.id)
+    role_id = cfg.get("default_role")
+    if not role_id:
+        return  # keine Autorole konfiguriert
+    role = member.guild.get_role(role_id)
+    if role:
+        try:
+            await member.add_roles(role, reason="Autorole Setup")
+        except discord.Forbidden:
+            print(f"❗️ Kann Rolle {role_id} nicht zuweisen in Guild {member.guild.id}")
 
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
