@@ -26,5 +26,9 @@
     [
         "unlock",
         "Hebt eine bestehende Sperre auf einem oder mehreren Kanälen sofort auf.\\nUsage: !unlock <#Kanal…>\\nBeispiel: !unlock #chat → hebt die Sperre im Chat sofort auf."
+    ],
+    [
+        "chat_cleanup",
+        "Startet eine wiederkehrende oder einmalige Nachrichtenlöschung in einem oder mehreren Kanälen.\\nWiederkehrend: Löscht automatisch Nachrichten in einem festen Intervall.\\nEinmalig: Löscht eine bestimmte Anzahl an Nachrichten auf einmal.\\nUsage (einmalig): !cleanup <#Kanal…> <Anzahl>\\nUsage (wiederkehrend): !cleanup <#Kanal…> <Tage> <Minuten>\\nBeispiel: !cleanup #chat 50 → löscht die letzten 50 Nachrichten im Chat."
     ]
 ]
