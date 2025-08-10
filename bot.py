@@ -168,6 +168,17 @@ async def setup(ctx, module: str):
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         vc_channel = msg_chan.channel_mentions[0]
+        # Verhindern, dass ein Kanal sowohl vc_override als auch vc_track hat
+        exists_track = await db_pool.fetchval(
+            "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+            ctx.guild.id, vc_channel.id
+        )
+        if exists_track:
+            return await ctx.send(
+                f"❌ Für {vc_channel.mention} ist bereits **vc_track** aktiv. "
+                "Bitte zuerst `!disable vc_track` ausführen oder einen anderen Kanal wählen."
+            )
+
 
         # 2) Override-Rollen abfragen
         await ctx.send("❓ Bitte erwähne **Override-Rollen** (z.B. `@Admin @Moderator`).")
@@ -232,6 +243,17 @@ async def setup(ctx, module: str):
         except asyncio.TimeoutError:
             return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
         vc_channel = msg_chan.channel_mentions[0]
+        # Verhindern, dass ein Kanal sowohl vc_track als auch vc_override hat
+        exists_override = await db_pool.fetchval(
+            "SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+            ctx.guild.id, vc_channel.id
+        )
+        if exists_override:
+            return await ctx.send(
+                f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. "
+                "Bitte zuerst `!disable vc_override` (optional mit Kanal) ausführen oder einen anderen Kanal wählen."
+            )
+
 
         # Sicherstellen, dass es einen Log-Kanal gibt (für Live-Embed)
         cfg = await get_guild_cfg(ctx.guild.id)
@@ -1110,6 +1132,8 @@ async def vc_live_tracker(member: discord.Member, before: discord.VoiceState, af
 
     # JOIN
     if joined:
+        if member.bot:
+            return
         # Wenn Member eine Override‑Rolle hat, Session starten/übernehmen
         if any(r.id in override_ids for r in member.roles):
             await _start_or_attach_session(member, vc, override_ids)
@@ -1147,21 +1171,20 @@ async def vc_live_tracker_simple(member: discord.Member, before: discord.VoiceSt
     vc = after.channel if joined else before.channel
     if vc is None:
         return
-    # Wenn der Kanal auch vc_override konfiguriert hat: Simple-Tracking hier überspringen
-    row_override = await db_pool.fetchrow(
-        "SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
-        member.guild.id, vc.id
-    )
-    if row_override:
-        return
-
-
-    # Nur Channels tracken, die in vc_tracking stehen
+    # Kanal muss in vc_tracking stehen …
     row = await db_pool.fetchrow(
         "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
         member.guild.id, vc.id
     )
     if not row:
+        return
+
+    # … und darf KEIN vc_override haben (sonst übernimmt der andere Listener)
+    row_override = await db_pool.fetchrow(
+        "SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+        member.guild.id, vc.id
+    )
+    if row_override:
         return
 
     if joined:
