@@ -30,5 +30,9 @@
     [
         "chat_cleanup",
         "Startet eine wiederkehrende oder einmalige Nachrichtenlöschung in einem oder mehreren Kanälen.\\nWiederkehrend: Löscht automatisch Nachrichten in einem festen Intervall.\\nEinmalig: Löscht eine bestimmte Anzahl an Nachrichten auf einmal.\\nUsage (einmalig): !cleanup <#Kanal…> <Anzahl>\\nUsage (wiederkehrend): !cleanup <#Kanal…> <Tage> <Minuten>\\nBeispiel: !cleanup #chat 50 → löscht die letzten 50 Nachrichten im Chat."
+    ],
+    [
+        "cleanup_stop",
+        "Stoppt eine laufende automatische Nachrichtenlöschung in einem oder mehreren Kanälen.\\nUsage: !cleanup_stop <#Kanal…>\\nBeispiel: !cleanup_stop #chat → beendet den automatischen Cleanup im Chat."
     ]
 ]
