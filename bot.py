@@ -30,6 +30,11 @@ def load_features():
             return json.load(f)
     return []
 
+def save_features(features):
+    """Speichert die aktuelle Feature-Liste in features.json."""
+    with open(FEATURES_FILE, "w", encoding="utf-8") as f:
+        json.dump(features, f, ensure_ascii=False, indent=4)
+
 def build_feature_list():
     """Gibt eine formatierte Feature-Liste als Text zurück."""
     features = load_features()
@@ -547,7 +552,7 @@ async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: 
 @commands.has_permissions(manage_channels=True)
 async def unlock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
     """
-    Hebbt Sperre sofort auf.
+    Hebt Sperre sofort auf.
     """
     if not channels:
         return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
