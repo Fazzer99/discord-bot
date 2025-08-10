@@ -1,8 +1,10 @@
 import os
+import base64
+import requests
 import json
 from pathlib import Path
 import asyncio
-import datetime
+from datetime import datetime, timezone
 from typing import Optional
 try:
     from zoneinfo import ZoneInfo
@@ -1255,9 +1257,71 @@ async def list_features(ctx):
     features_text = build_feature_list() or "Keine Features eingetragen."
     await ctx.send(f"📋 **Aktuelle Features:**\n\n{features_text}")
 
+# Ablaufdatum des GitHub-Tokens (Format: YYYY-MM-DD) – kommt aus Railway Env
+GITHUB_TOKEN_EXPIRATION = os.getenv("GITHUB_TOKEN_EXPIRATION", "2025-11-05")  # Beispiel
+
+def days_until_token_expires():
+    """Berechnet, wie viele Tage bis zum Ablauf des Tokens verbleiben."""
+    try:
+        exp_date = datetime.strptime(GITHUB_TOKEN_EXPIRATION, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return (exp_date - datetime.now(timezone.utc)).days
+    except Exception:
+        return None
+
+async def warn_if_token_expiring(ctx):
+    """Sendet dem Bot-Owner eine DM, wenn das Token bald abläuft."""
+    days_left = days_until_token_expires()
+    if days_left is not None and days_left <= 7:
+        try:
+            await ctx.author.send(
+                f"⚠️ Dein GitHub-Token läuft in **{days_left} Tagen** ab!\n"
+                "Bitte erneuere es rechtzeitig in Railway."
+            )
+        except:
+            pass  # Falls DMs deaktiviert sind
+
+def commit_feature_file():
+    """Commitet features.json ins GitHub-Repo."""
+    repo = os.getenv("GITHUB_REPO")
+    branch = os.getenv("GITHUB_BRANCH", "main")
+    token = os.getenv("GITHUB_TOKEN")
+    if not repo or not token:
+        print("❌ GitHub Commit übersprungen: Env Vars fehlen.")
+        return False, "GitHub-Einstellungen fehlen"
+
+    try:
+        with open(FEATURES_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Aktuellen SHA der Datei holen
+        url = f"https://api.github.com/repos/{repo}/contents/{FEATURES_FILE.name}"
+        headers = {"Authorization": f"token {token}"}
+        params = {"ref": branch}
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code == 401:
+            return False, "GitHub-Token ungültig oder abgelaufen"
+        r.raise_for_status()
+        sha = r.json()["sha"]
+
+        # Datei committen
+        message = "Update features.json via bot command"
+        data = {
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+            "sha": sha,
+            "branch": branch
+        }
+        r = requests.put(url, headers=headers, json=data)
+        r.raise_for_status()
+        print("✅ features.json erfolgreich zu GitHub gepusht.")
+        return True, "Features erfolgreich zu GitHub gepusht."
+    except Exception as e:
+        print(f"❌ GitHub Commit fehlgeschlagen: {e}")
+        return False, str(e)
+
 @bot.command(name="add_feature")
 async def add_feature(ctx, name: str, *, description: str):
-    """Fügt ein neues Feature zur Liste hinzu (nur Bot-Owner)."""
+    """Fügt ein neues Feature zur Liste hinzu (nur Bot-Owner, mit GitHub-Commit)."""
     if ctx.author.id != BOT_OWNER_ID:
         return await ctx.send("❌ Du darfst diesen Befehl nicht nutzen.")
     
@@ -1265,9 +1329,19 @@ async def add_feature(ctx, name: str, *, description: str):
     if any(f[0].lower() == name.lower() for f in features):
         return await ctx.send(f"⚠️ Feature `{name}` existiert bereits.")
     
+    # Neues Feature hinzufügen
     features.append([name, description])
     save_features(features)
-    await ctx.send(f"✅ Feature `{name}` hinzugefügt.")
+
+    # In GitHub committen
+    success, message = commit_feature_file()
+    if success:
+        await ctx.send(f"✅ Feature `{name}` hinzugefügt.\n📤 {message}")
+    else:
+        await ctx.send(f"⚠️ Feature `{name}` wurde lokal gespeichert, aber nicht zu GitHub gepusht.\nGrund: {message}")
+
+    # Warnung bei bald ablaufendem Token
+    await warn_if_token_expiring(ctx)
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
