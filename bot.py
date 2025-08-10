@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 import asyncio
 import datetime
 from typing import Optional
@@ -13,6 +14,24 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord.ext.commands import Greedy
+
+# Deine eigene Discord-User-ID 
+BOT_OWNER_ID = 693861343014551623
+
+# --- Features -------------------------------------------------------------
+FEATURES_FILE = Path(__file__).parent / "features.json"
+
+def load_features():
+    """Lädt die Features aus der features.json"""
+    if FEATURES_FILE.exists():
+        with open(FEATURES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def build_feature_list():
+    """Gibt eine formatierte Feature-Liste als Text zurück."""
+    features = load_features()
+    return "\n\n".join(f"• **{name}**\n{desc}" for name, desc in features)
 
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
@@ -1215,88 +1234,40 @@ async def on_member_join(member: discord.Member):
 
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
-async def on_guild_join(guild: discord.Guild):
-    # 1️⃣ Lege einen neuen Textkanal für die Bot-Anleitung an
-    try:
-        info_channel = await guild.create_text_channel(
-            name="fazzer´s bot-setup",
-            reason="Bot-Beitritt: Einrichtungs- und Info-Kanal erstellen"
+async def on_guild_join(guild):
+    features_text = build_feature_list()
+
+    channel = guild.system_channel or next(
+        (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
+    )
+    if channel:
+        await channel.send(
+            f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
+            f"Ich kann aktuell:\n\n{features_text}\n\n"
+            "ℹ️ Nutze `!setup <feature>` um ein Feature einzurichten."
         )
-    except discord.Forbidden:
-        # Falls wir keine Rechte zum Anlegen haben, fallback auf system_channel
-        info_channel = guild.system_channel
-    if info_channel is None:
-        return
 
-    # 2️⃣ Baue die beiden Teile der Anleitung
-    part1 = (
-        f"👋 **Hallo {guild.name}!** Ich bin Dein neuer Bot – hier die ausführliche Anleitung:\n\n"
+# --- Feature-Liste anzeigen ---------------------------------------------------
+@bot.command(name="features")
+@commands.has_permissions(administrator=True)
+async def list_features(ctx):
+    """Zeigt die aktuelle Feature-Liste aus features.json an."""
+    features_text = build_feature_list() or "Keine Features eingetragen."
+    await ctx.send(f"📋 **Aktuelle Features:**\n\n{features_text}")
 
-        "**1️⃣ SETUP-Module**\n"
-        "• `!setup welcome`\n"
-        "  – Danach fragt der Bot nacheinander:\n"
-        "    1. Kanal erwähnen (z.B. `#welcome`)\n"
-        "    2. Rolle erwähnen, die die Begrüßung auslöst (z.B. `@Newbie`)\n"
-        "    3. Begrüßungstext eingeben. Platzhalter:\n"
-        "       • `{member}` → Member-Mention\n"
-        "       • `{guild}`  → Server-Name\n"
-        "    Beispiel: `Willkommen {member} auf {guild}! Viel Spaß! 😊`\n\n"
-        "• `!setup leave`\n"
-        "  – Danach fragt der Bot nacheinander:\n"
-        "    1. Kanal erwähnen (z.B. `#goodbye`)\n"
-        "    2. Abschiedstext eingeben. Platzhalter wie oben\n"
-        "    Beispiel: `{member} hat uns verlassen… Wir werden dich vermissen! 💔`\n\n"
-        "• `!setup vc_override`\n"
-        "  – Danach fragt der Bot nacheinander:\n"
-        "    1. **Override-Rollen** erwähnen (z.B. `@Admin @Moderator`)\n"
-        "    2. **Ziel-Rollen** erwähnen, die bei Beitritt einer Override-Rolle automatisch Zugriff auf gesperrte Voice-Channels erhalten\n\n"
-        "• `!setup autorole`\n"
-        "  – Lege eine Standard-Rolle fest, die neuen Mitgliedern beim Betreten automatisch zugewiesen wird.\n"
-        "  – Du wirst nur noch gefragt: Rolle erwähnen (z.B. `@Member`)\n\n"
-        "• `!disable <module>`\n"
-        "  – Deaktiviert ein eingerichtetes Modul und entfernt dazu alle gespeicherten Einstellungen:\n"
-        "    – `!disable welcome` oder `!disable leave`\n"
-        "    – `!disable vc_override [#VoiceChannel...]` (optional List von Channels)\n"
-        "    – `!disable autorole` entfernt die Auto-Role-Konfiguration\n\n"
-    )
-
-    part2 = (
-        "**2️⃣ KANÄLE SPERREN & ENTSPERREN**\n"
-        "• `!lock <#Kanal1> [#Kanal2 …] <HH:MM> <Minuten>`\n"
-        "  – Mindestens einen Text- oder Voice-Kanal mentionen\n"
-        "  – Uhrzeit im 24-h-Format (`HH:MM`), z.B. `21:30`\n"
-        "  – Dauer in Minuten, z.B. `15`\n"
-        "  Beispiel: `!lock #general #Voice 21:30 15`\n\n"
-        "• `!unlock <#Kanal1> [#Kanal2 …]`\n"
-        "  – Hebt jede laufende Sperre sofort auf\n"
-        "  Beispiel: `!unlock #general #Voice`\n\n"
-
-        "**3️⃣ CHAT-CLEANUP**\n"
-        "• `!cleanup <#Kanal…> <Tage> <Minuten>`\n"
-        "  – Löscht automatisch alle Nachrichten im Abstand von Tagen+Minuten\n"
-        "  – `0 10` = alle 10 Minuten, `1 0` = alle 24 Stunden\n\n"
-        "• `!cleanup_stop <#Kanal…>`\n"
-        "  – Stoppt die automatische Löschung\n\n"
-
-        "**❗️ Benötigte Rechte**\n"
-        "– `!setup`: **Manage Server**\n"
-        "– `!setup vc_override`: **Manage Server** (zum Speichern von Override-/Ziel-Rollen)\n"
-        "– `!lock`/`!unlock`: **Manage Channels**\n"
-        "– `!cleanup`/`!cleanup_stop`: **Manage Messages**\n\n"
-
-        "**✅ Nächste Schritte**\n"
-        "1. Führe `!setup welcome` aus und beantworte die Fragen\n"
-        "2. Führe `!setup leave` aus und gib Dein Abschiedstemplate ein\n"
-        "3. Teste `!lock` und `!cleanup`\n\n"
-
-        "ℹ️ Bitte lösche diesen Kanal **NICHT**, sondern verschiebe ihn in Deinen **Admin-Bereich** "
-        "und synchronisiere dort die Kanal-Berechtigungen, sodass nur Admins ihn sehen können.\n"
-        "Viel Spaß mit Deinem neuen Bot! 🚀"
-    )
-
-    # 3️⃣ Sende die beiden Nachrichtenteile
-    await info_channel.send(part1)
-    await info_channel.send(part2)
+@bot.command(name="add_feature")
+async def add_feature(ctx, name: str, *, description: str):
+    """Fügt ein neues Feature zur Liste hinzu (nur Bot-Owner)."""
+    if ctx.author.id != BOT_OWNER_ID:
+        return await ctx.send("❌ Du darfst diesen Befehl nicht nutzen.")
+    
+    features = load_features()
+    if any(f[0].lower() == name.lower() for f in features):
+        return await ctx.send(f"⚠️ Feature `{name}` existiert bereits.")
+    
+    features.append([name, description])
+    save_features(features)
+    await ctx.send(f"✅ Feature `{name}` hinzugefügt.")
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
