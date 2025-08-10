@@ -1249,6 +1249,7 @@ async def on_guild_join(guild):
     if setup_channel is None:
         try:
             setup_channel = await guild.create_text_channel("fazzer´s-bot-setup")
+            await asyncio.sleep(1)
         except discord.Forbidden:
             setup_channel = guild.system_channel or next(
                 (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
