@@ -1265,9 +1265,43 @@ async def on_guild_join(guild):
 @bot.command(name="features")
 @commands.has_permissions(administrator=True)
 async def list_features(ctx):
-    """Zeigt die aktuelle Feature-Liste aus features.json an."""
-    features_text = build_feature_list() or "Keine Features eingetragen."
-    await ctx.send(f"📋 **Aktuelle Features:**\n\n{features_text}")
+    """Zeigt die aktuelle Feature-Liste aus features.json an (schöne Embed-Variante)."""
+    features = load_features()
+    if not features:
+        return await ctx.send("Keine Features eingetragen.")
+
+    embeds = []
+    current_embed = discord.Embed(
+        title="📋 Aktuelle Features",
+        color=discord.Color.blurple()
+    )
+
+    total_chars = 0
+    for name, desc in features:
+        field_value = desc.replace("\\n", "\n")  # \n aus JSON zu echten Zeilenumbrüchen
+        if len(field_value) > 1024:
+            # Discord erlaubt pro Embed-Feld max. 1024 Zeichen → splitten
+            parts = [field_value[i:i+1024] for i in range(0, len(field_value), 1024)]
+            current_embed.add_field(name=name, value=parts[0], inline=False)
+            for part in parts[1:]:
+                current_embed.add_field(name="↳ Fortsetzung", value=part, inline=False)
+        else:
+            current_embed.add_field(name=name, value=field_value, inline=False)
+
+        # Check: wenn Embed zu voll → neues erstellen
+        total_chars += len(name) + len(field_value)
+        if len(current_embed.fields) >= 25 or total_chars > 5500:  # Sicherheits-Puffer
+            embeds.append(current_embed)
+            current_embed = discord.Embed(color=discord.Color.blurple())
+            total_chars = 0
+
+    # Letzten Embed anhängen
+    if len(current_embed.fields) > 0:
+        embeds.append(current_embed)
+
+    # Alle Embeds senden
+    for embed in embeds:
+        await ctx.send(embed=embed)
 
 # Ablaufdatum des GitHub-Tokens (Format: YYYY-MM-DD) – kommt aus Railway Env
 GITHUB_TOKEN_EXPIRATION = os.getenv("GITHUB_TOKEN_EXPIRATION", "2025-11-05")  # Beispiel
