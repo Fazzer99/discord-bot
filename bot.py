@@ -1242,25 +1242,45 @@ async def on_member_join(member: discord.Member):
 # --- Guild Join Event -----------------------------------------------------
 @bot.event
 async def on_guild_join(guild):
-    features_text = build_feature_list()
+    # Features laden und als Liste aufbauen
+    features = load_features()
+    if not features:
+        features_text = "Keine Features eingetragen."
+    else:
+        features_text = ""
+        for name, desc in features:
+            # \n aus JSON in echte Zeilenumbrüche umwandeln
+            features_text += f"• **{name}**\n{desc.replace('\\n', '\n')}\n\n"
 
-    # Prüfen, ob der Kanal schon existiert
-    setup_channel = discord.utils.get(guild.text_channels, name="fazzer´s-bot-setup")
+    # Kanal finden oder erstellen
+    setup_channel = discord.utils.get(guild.text_channels, name="fazzers-bot-setup")
     if setup_channel is None:
         try:
-            setup_channel = await guild.create_text_channel("fazzer´s-bot-setup")
-            await asyncio.sleep(1)
+            setup_channel = await guild.create_text_channel("fazzers-bot-setup")
+            await asyncio.sleep(1)  # kleine Pause, damit Kanal bereit ist
         except discord.Forbidden:
             setup_channel = guild.system_channel or next(
                 (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
             )
 
+    # Begrüßungsnachricht + Feature-Liste senden (mit 2000-Zeichen-Limit)
     if setup_channel:
-        await setup_channel.send(
-            f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
-            f"Ich kann aktuell:\n\n{features_text}\n\n"
-            "ℹ️ Nutze `!setup <feature>` um ein Feature einzurichten."
-        )
+        intro_msg = f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
+        if len(intro_msg + features_text) <= 2000:
+            await setup_channel.send(intro_msg + features_text)
+        else:
+            # Erst nur die Begrüßung senden
+            await setup_channel.send(intro_msg)
+            # Feature-Liste in Blöcken senden
+            current_block = ""
+            for name, desc in features:
+                entry = f"• **{name}**\n{desc.replace('\\n', '\n')}\n\n"
+                if len(current_block) + len(entry) > 2000:
+                    await setup_channel.send(current_block)
+                    current_block = ""
+                current_block += entry
+            if current_block:
+                await setup_channel.send(current_block)
 
 # --- Feature-Liste anzeigen ---------------------------------------------------
 @bot.command(name="features")
