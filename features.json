@@ -18,5 +18,9 @@
     [
         "autorole",
         "Verteilt automatisch eine Standardrolle an neue Mitglieder.\nSetup: !setup autorole → Rolle auswählen.\nDeaktivieren: !disable autorole."
+    ],
+    [
+        "lock",
+        "Sperrt einen oder mehrere Kanäle automatisch für eine festgelegte Zeit.\\nÖffentlich: @everyone verliert Schreib- und Sprechrechte.\\nPrivat: Alle Rollen, die den Kanal sehen dürfen, verlieren Schreib- und Sprechrechte, können ihn aber weiterhin sehen.\\nUsage: !lock <#Kanal…> <Dauer_in_Minuten>\\nBeispiel: !lock #chat 10 → sperrt den Chat für 10 Minuten."
     ]
 ]
