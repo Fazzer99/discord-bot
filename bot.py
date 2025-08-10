@@ -147,11 +147,11 @@ async def on_command_error(ctx, error):
 async def setup(ctx, module: str):
     """
     Interaktives Setup für Module:
-      welcome, leave, vc_override
+      welcome, leave, vc_override, autorole, vc_track
     """
     module = module.lower()
-    if module not in ("welcome", "leave", "vc_override", "autorole"):
-        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`.")
+    if module not in ("welcome", "leave", "vc_override", "autorole", "vc_track"):
+        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
 
     # ─── vc_override-Setup: Kanal + Override- und Ziel-Rollen abfragen und speichern ────
     if module == "vc_override":
@@ -221,6 +221,45 @@ async def setup(ctx, module: str):
             f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\n"
             "Override-Rollen und Ziel-Rollen wurden gespeichert."
         )
+    
+        # ─── vc_track-Setup: normalen Sprachkanal zum Tracking registrieren ─────
+    if module == "vc_track":
+        await ctx.send("❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.")
+        def check_chan(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
+        try:
+            msg_chan = await bot.wait_for("message", check=check_chan, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
+        vc_channel = msg_chan.channel_mentions[0]
+
+        # Sicherstellen, dass es einen Log-Kanal gibt (für Live-Embed)
+        cfg = await get_guild_cfg(ctx.guild.id)
+        if not cfg.get("vc_log_channel"):
+            await ctx.send("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+            def check_vclog(m: discord.Message):
+                return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
+            try:
+                msg_log = await bot.wait_for("message", check=check_vclog, timeout=60)
+            except asyncio.TimeoutError:
+                return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
+            log_ch = msg_log.channel_mentions[0]
+            await update_guild_cfg(ctx.guild.id, vc_log_channel=log_ch.id)
+
+        # Da Railway kein Composite-Unique zulässt: Existenz prüfen statt ON CONFLICT
+        exists = await db_pool.fetchval(
+            "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+            ctx.guild.id, vc_channel.id
+        )
+        if exists:
+            return await ctx.send(f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.")
+
+        await db_pool.execute(
+            "INSERT INTO vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
+            ctx.guild.id, vc_channel.id
+        )
+
+        return await ctx.send(f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.")
 
     # ─── Autorole-Setup: Standard-Rolle abfragen und speichern ──────────────
     if module == "autorole":
@@ -301,8 +340,8 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
     sonst für alle Channels der Guild.
     """
     module = module.lower()
-    if module not in ("welcome", "leave", "vc_override", "autorole"):
-        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`.")
+    if module not in ("welcome", "leave", "vc_override", "autorole", "vc_track"):
+        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
 
     guild_id = ctx.guild.id
 
@@ -310,6 +349,25 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
     if module == "autorole":
         await update_guild_cfg(guild_id, default_role=None)
         return await ctx.send("🗑️ Modul **autorole** wurde deaktiviert. Keine Autorole mehr gesetzt.")
+    
+        # vc_track deaktivieren
+    if module == "vc_track":
+        if channels:
+            removed = []
+            for ch in channels:
+                # Nur VoiceChannels löschen; Text-/Threads ignorieren
+                if isinstance(ch, discord.VoiceChannel):
+                    await db_pool.execute(
+                        "DELETE FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+                        guild_id, ch.id
+                    )
+                    removed.append(ch.mention)
+            if removed:
+                return await ctx.send(f"🗑️ VC-Tracking entfernt für: {', '.join(removed)}")
+            return await ctx.send("ℹ️ Keine gültigen Voice-Channels angegeben.")
+        else:
+            await db_pool.execute("DELETE FROM vc_tracking WHERE guild_id=$1", guild_id)
+            return await ctx.send("🗑️ VC-Tracking für **alle** Voice-Channels entfernt.")
 
     # welcome & leave: Channel und Role entfernen
     if module in ("welcome", "leave"):
@@ -623,7 +681,7 @@ async def cleanup_stop_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
         else:
             await ctx.send(f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
 
-# --- VC Live Tracking / vc_log_channel -------------------------------------
+# --- VC Live Tracking / vc_log_channel (vc_override) -------------------------------------
 # Laufende Sessions pro Voice-Channel
 # Struktur pro VC-ID:
 # {
@@ -797,6 +855,139 @@ async def _handle_leave(member: discord.Member, vc: discord.VoiceChannel, overri
 
     vc_live_sessions.pop(sid, None)
 
+# --- Simple Tracking: start=erste Person, stop=Channel leer -----------------
+def _render_embed_payload_simple(session: dict) -> discord.Embed:
+    guild = bot.get_guild(session["guild_id"])
+    vc = guild.get_channel(session["channel_id"]) if guild else None
+    started_by = guild.get_member(session["started_by_id"]) if guild else None
+
+    now = _now()
+    totals = {uid: secs for uid, secs in session["accum"].items()}
+    for uid, t0 in session["running"].items():
+        totals[uid] = totals.get(uid, 0) + max(0, int((now - t0).total_seconds()))
+
+    lines = []
+    for uid, secs in sorted(totals.items(), key=lambda x: x[1], reverse=True):
+        m = guild.get_member(uid) if guild else None
+        name = m.display_name if m else f"User {uid}"
+        lines.append(f"• **{name}** – `{_fmt_dur(secs)}`")
+
+    emb = discord.Embed(
+        title=("🎙️ Voice-Session (LIVE)" if session.get("task") else "✅ Voice-Session (Final)"),
+        color=0x5865F2,
+    )
+    if vc:
+        emb.add_field(name="Channel", value=vc.mention, inline=True)
+    if started_by:
+        emb.add_field(name="Getriggert von", value=started_by.mention, inline=True)
+    emb.add_field(name="Gestartet", value=session["started_at"].strftime("%d.%m.%Y %H:%M:%S"), inline=True)
+    emb.add_field(name="Anwesenheit", value=("\n".join(lines) if lines else "—"), inline=False)
+    emb.set_footer(text="Die Liste aktualisiert sich live, solange Personen im Channel sind.")
+    return emb
+
+async def _update_live_message_simple(session: dict):
+    try:
+        while session.get("task") is not None:
+            msg = session.get("message")
+            if msg:
+                try:
+                    await msg.edit(embed=_render_embed_payload_simple(session))
+                except discord.NotFound:
+                    break
+            await asyncio.sleep(5)
+    finally:
+        session["task"] = None
+
+async def _start_or_attach_session_simple(member: discord.Member, vc: discord.VoiceChannel):
+    sid = vc.id
+    now = _now()
+    sess = vc_live_sessions.get(sid)
+
+    cfg = await get_guild_cfg(member.guild.id)
+    log_id = cfg.get("vc_log_channel")
+    log_channel = member.guild.get_channel(log_id) if log_id else None
+
+    if sess is None:
+        sess = {
+            "guild_id": member.guild.id,
+            "channel_id": vc.id,
+            "started_by_id": member.id,  # erster Joiner
+            "started_at": now,
+            "accum": {},
+            "running": {},
+            "message": None,
+            "task": None,
+        }
+        vc_live_sessions[sid] = sess
+
+        target_channel = log_channel if isinstance(log_channel, discord.TextChannel) else member.guild.system_channel
+        if target_channel is None:
+            try:
+                dm = await member.create_dm()
+                msg = await dm.send(embed=_render_embed_payload_simple(sess))
+            except Exception:
+                msg = None
+        else:
+            msg = await target_channel.send(embed=_render_embed_payload_simple(sess))
+        sess["message"] = msg
+        sess["task"] = bot.loop.create_task(_update_live_message_simple(sess))
+
+        # alle bereits im VC (ohne Bots) aufnehmen
+        now = _now()
+        for m in vc.members:
+            if m.bot: 
+                continue
+            if m.id not in sess["running"]:
+                sess["running"][m.id] = now
+            sess["accum"].setdefault(m.id, 0)
+
+    if member.id not in sess["running"]:
+        sess["running"][member.id] = now
+    sess["accum"].setdefault(member.id, 0)
+
+async def _handle_leave_simple(member: discord.Member, vc: discord.VoiceChannel):
+    sid = vc.id
+    sess = vc_live_sessions.get(sid)
+    if not sess:
+        return
+
+    t0 = sess["running"].pop(member.id, None)
+    if t0:
+        add = int((_now() - t0).total_seconds())
+        if add > 0:
+            sess["accum"][member.id] = sess["accum"].get(member.id, 0) + add
+
+    # noch Personen im VC? (Bots ignorieren)
+    if any(not m.bot for m in vc.members):
+        if sess.get("message"):
+            try:
+                await sess["message"].edit(embed=_render_embed_payload_simple(sess))
+            except discord.NotFound:
+                pass
+        return
+
+    # finalisieren (Channel leer)
+    now = _now()
+    for uid, t0 in list(sess["running"].items()):
+        sess["accum"][uid] = sess["accum"].get(uid, 0) + max(0, int((now - t0).total_seconds()))
+    sess["running"].clear()
+
+    task = sess.get("task")
+    if task:
+        task.cancel()
+        sess["task"] = None
+
+    if sess.get("message"):
+        try:
+            final = _render_embed_payload_simple(sess)
+            final.title = "🧾 Voice-Session (Abschluss)"
+            final.set_footer(text="Session beendet – der Channel ist jetzt leer.")
+            await sess["message"].edit(embed=final)
+        except discord.NotFound:
+            pass
+
+    vc_live_sessions.pop(sid, None)
+
 # ─── Voice-Override: wenn Override-Rollen eintreten/verlassen ──────────────
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -876,7 +1067,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             )
     return
 
-# --- Zusatz-Listener: Live-Tracking (vc_log_channel) -----------------------
+# --- Zusatz-Listener: Live-Tracking (vc_override) -----------------------
 async def vc_live_tracker(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     """
     Ergänzender Listener: startet Live-Session, hält Anwesenheitsliste & Zeiten
@@ -945,6 +1136,45 @@ async def vc_live_tracker(member: discord.Member, before: discord.VoiceState, af
 
 # Listener registrieren (überschreibt nichts)
 bot.add_listener(vc_live_tracker, "on_voice_state_update")
+
+# --- Listener: Simple VC-Tracking (aktiv bei Einträgen in vc_tracking) -----
+async def vc_live_tracker_simple(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    joined = before.channel is None and after.channel is not None
+    left   = before.channel is not None and after.channel is None
+    if not (joined or left):
+        return
+
+    vc = after.channel if joined else before.channel
+    if vc is None:
+        return
+    # Wenn der Kanal auch vc_override konfiguriert hat: Simple-Tracking hier überspringen
+    row_override = await db_pool.fetchrow(
+        "SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+        member.guild.id, vc.id
+    )
+    if row_override:
+        return
+
+
+    # Nur Channels tracken, die in vc_tracking stehen
+    row = await db_pool.fetchrow(
+        "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+        member.guild.id, vc.id
+    )
+    if not row:
+        return
+
+    if joined:
+        if member.bot:
+            return  # Bots starten keine Session
+        await _start_or_attach_session_simple(member, vc)
+        return
+
+    if left and vc.id in vc_live_sessions:
+        await _handle_leave_simple(member, vc)
+
+# registrieren
+bot.add_listener(vc_live_tracker_simple, "on_voice_state_update")
 
 # ─── Autorole: neuen Mitgliedern automatisch die default_role geben ─────
 @bot.event
