@@ -1,0 +1,22 @@
+[
+    [
+        "welcome",
+        "Begrüßt neue Mitglieder automatisch in einem festgelegten Kanal.\nSetup: !setup welcome → Kanal auswählen.\nDeaktivieren: !disable welcome."
+    ],
+    [
+        "leave",
+        "Sendet automatisch eine Abschiedsnachricht, wenn Mitglieder den Server verlassen.\nSetup: !setup leave → Kanal auswählen.\nDeaktivieren: !disable leave."
+    ],
+    [
+        "vc_override",
+        "Automatisches Anpassen der Sprachkanal-Rechte, wenn ein Mitglied mit einer bestimmten Override-Rolle beitritt.\nZusätzlich wird ein Live-Tracking der Anwesenden gestartet.\nSetup: !setup vc_override → Sprachkanal + Rollen auswählen.\nDeaktivieren: !disable vc_override [optional: Sprachkanal]."
+    ],
+    [
+        "vc_track",
+        "Tracking für normale Sprachkanäle (ohne Override). Zeigt live, wer im Kanal ist und wie lange.\nSetup: !setup vc_track → Sprachkanal auswählen.\nDeaktivieren: !disable vc_track [optional: Sprachkanal]."
+    ],
+    [
+        "autorole",
+        "Verteilt automatisch eine Standardrolle an neue Mitglieder.\nSetup: !setup autorole → Rolle auswählen.\nDeaktivieren: !disable autorole."
+    ]
+]
