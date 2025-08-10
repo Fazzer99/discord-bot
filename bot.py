@@ -1239,11 +1239,18 @@ async def on_member_join(member: discord.Member):
 async def on_guild_join(guild):
     features_text = build_feature_list()
 
-    channel = guild.system_channel or next(
-        (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
-    )
-    if channel:
-        await channel.send(
+    # Prüfen, ob der Kanal schon existiert
+    setup_channel = discord.utils.get(guild.text_channels, name="fazzer´s-bot-setup")
+    if setup_channel is None:
+        try:
+            setup_channel = await guild.create_text_channel("fazzer´s-bot-setup")
+        except discord.Forbidden:
+            setup_channel = guild.system_channel or next(
+                (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
+            )
+
+    if setup_channel:
+        await setup_channel.send(
             f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
             f"Ich kann aktuell:\n\n{features_text}\n\n"
             "ℹ️ Nutze `!setup <feature>` um ein Feature einzurichten."
