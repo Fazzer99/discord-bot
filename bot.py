@@ -1,10 +1,11 @@
 import os
 import base64
 import requests
+import aiohttp
 import json
 from pathlib import Path
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 try:
     from zoneinfo import ZoneInfo
@@ -16,6 +17,106 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord.ext.commands import Greedy
+
+DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
+DEEPL_KEY = os.getenv("DEEPL_API_KEY")
+
+# Cache: Text_DE -> Text_EN
+_translation_cache: dict[str, str] = {}
+
+async def translate_de_to_en(text_de: str) -> str:
+    """Übersetzt deutschen Text ins Englische. Nutzt Cache + Fallback."""
+    if not text_de or not text_de.strip():
+        return text_de
+    if text_de in _translation_cache:
+        return _translation_cache[text_de]
+    if not DEEPL_KEY:
+        return text_de
+
+    payload = {
+        "auth_key": DEEPL_KEY,
+        "text": text_de,
+        "source_lang": "DE",
+        "target_lang": "EN"
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)  # max. 10 Sekunden
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(DEEPL_API_URL, data=payload) as resp:
+                if resp.status != 200:
+                    return text_de
+                data = await resp.json()
+                en = data["translations"][0]["text"]
+                _translation_cache[text_de] = en
+                return en
+    except asyncio.TimeoutError:
+        # Bei Timeout: Originaltext zurückgeben
+        return text_de
+    except Exception:
+        # Bei anderen Fehlern: Originaltext zurückgeben
+        return text_de
+        
+async def translate_text_for_guild(guild_id: int, text_de: str) -> str:
+    if not text_de:
+        return text_de
+    try:
+        cfg = await get_guild_cfg(guild_id)
+    except Exception:
+        return text_de
+    lang = (cfg.get("lang") or "").lower()
+    if lang == "en":
+        return await translate_de_to_en(text_de)
+    return text_de
+        
+async def translate_embed_for_guild(guild_id: int, embed: discord.Embed) -> discord.Embed:
+    """Übersetzt Embed-Texte DE→EN, wenn guild_settings.lang == 'en'."""
+    if embed is None:
+        return embed
+    cfg = await get_guild_cfg(guild_id)
+    lang = (cfg.get("lang") or "").lower()
+    if lang != "en":
+        return embed  # nur DE→EN
+
+    # Titel & Beschreibung
+    if embed.title:
+        embed.title = await translate_de_to_en(embed.title)
+    if embed.description:
+        embed.description = await translate_de_to_en(embed.description)
+
+    # Fields
+    if embed.fields:
+        fields = []
+        for f in embed.fields:
+            name = await translate_de_to_en(f.name) if f.name else f.name
+            value = await translate_de_to_en(f.value) if f.value else f.value
+            fields.append((name, value, f.inline))
+        embed.clear_fields()
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+
+    # Footer
+    if embed.footer and embed.footer.text:
+        embed.set_footer(text=await translate_de_to_en(embed.footer.text), icon_url=embed.footer.icon_url)
+
+    # Author
+    if embed.author and embed.author.name:
+        embed.set_author(
+            name=await translate_de_to_en(embed.author.name),
+            url=embed.author.url,
+            icon_url=embed.author.icon_url
+        )
+    return embed
+
+async def reply(ctx, text_de: str, **fmt):
+    """Wrapper: schreibt DE im Code, gibt bei lang=en Englisch aus."""
+    rendered_de = text_de.format(**fmt) if fmt else text_de
+    cfg = await get_guild_cfg(ctx.guild.id)
+    lang = (cfg.get("lang") or "").lower()
+    if lang == "en":
+        rendered = await translate_de_to_en(rendered_de)
+    else:
+        rendered = rendered_de
+    return await ctx.send(rendered)
 
 # Deine eigene Discord-User-ID 
 BOT_OWNER_ID = 693861343014551623
@@ -53,8 +154,39 @@ if DB_URL is None:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members         = True  # für Member-Events benötigt
-bot       = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 db_pool: asyncpg.Pool | None = None
+
+@bot.check
+async def ensure_lang_set(ctx):
+    if ctx.guild is None:
+        return True
+    if ctx.command and ctx.command.name == "setlang":
+        return True
+    cfg = await get_guild_cfg(ctx.guild.id)
+    if (cfg.get("lang") or "").lower() in ("de", "en"):
+        return True
+    await ctx.send(
+        "🌐 Bitte zuerst die Sprache wählen mit `!setlang de` oder `!setlang en`.\n"
+        "🌐 Please choose a language first: `!setlang de` or `!setlang en`."
+    )
+    return False
+
+@bot.command(name="setlang")
+@commands.has_permissions(manage_guild=True)
+async def setlang(ctx, lang: str):
+    """
+    Setzt die Bot-Sprache für diesen Server.
+    Erlaubt: de | en
+    """
+    lang = (lang or "").strip().lower()
+    if lang not in ("de", "en"):
+        return await reply(ctx, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.")
+    await update_guild_cfg(ctx.guild.id, lang=lang)
+    if lang == "de":
+        await reply(ctx, "✅ Sprache gesetzt auf **Deutsch**. Deutsche Texte bleiben deutsch.")
+    else:
+        await reply(ctx, "✅ Language set to **English**. German texts will be auto-translated to English.")
 
 # --- Guild-DB-Helpers -----------------------------------------------------
 async def get_guild_cfg(guild_id: int) -> dict:
@@ -159,11 +291,11 @@ async def on_ready():
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Fehlendes Argument: `{error.param.name}`")
+        await reply(ctx, "❌ Fehlendes Argument: `{name}`", name=error.param.name)
     elif isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Du hast nicht die nötigen Rechte.")
+        await reply(ctx, "❌ Du hast nicht die nötigen Rechte.")
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send("❌ Du hast nicht die nötigen Rechte für diesen Befehl.")
+        await reply(ctx, "❌ Du hast nicht die nötigen Rechte für diesen Befehl.")
     else:
         raise error
 
@@ -177,12 +309,12 @@ async def setup(ctx, module: str):
     """
     module = module.lower()
     if module not in ("welcome", "leave", "vc_override", "autorole", "vc_track"):
-        return await ctx.send("❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
+        return await reply(ctx, "❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
 
     # ─── vc_override-Setup: Kanal + Override- und Ziel-Rollen abfragen und speichern ────
     if module == "vc_override":
         # 1) Sprachkanal abfragen
-        await ctx.send("❓ Bitte erwähne den **Sprachkanal**, für den das Override gelten soll.")
+        await reply(ctx, "❓ Bitte erwähne den **Sprachkanal**, für den das Override gelten soll.")
         def check_chan(m: discord.Message):
             return (
                 m.author == ctx.author
@@ -192,7 +324,7 @@ async def setup(ctx, module: str):
         try:
             msg_chan = await bot.wait_for("message", check=check_chan, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         vc_channel = msg_chan.channel_mentions[0]
         # Verhindern, dass ein Kanal sowohl vc_override als auch vc_track hat
         exists_track = await db_pool.fetchval(
@@ -200,40 +332,36 @@ async def setup(ctx, module: str):
             ctx.guild.id, vc_channel.id
         )
         if exists_track:
-            return await ctx.send(
-                f"❌ Für {vc_channel.mention} ist bereits **vc_track** aktiv. "
-                "Bitte zuerst `!disable vc_track` ausführen oder einen anderen Kanal wählen."
-            )
-
-
+            return await reply(ctx, f"❌ Für {vc_channel.mention} ist bereits **vc_track** aktiv. Bitte zuerst `!disable vc_track` ausführen oder einen anderen Kanal wählen.")
+    
         # 2) Override-Rollen abfragen
-        await ctx.send("❓ Bitte erwähne **Override-Rollen** (z.B. `@Admin @Moderator`).")
+        await reply(ctx, "❓ Bitte erwähne **Override-Rollen** (z.B. `@Admin @Moderator`).")
         def check_override(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msg_o = await bot.wait_for("message", check=check_override, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         override_ids = [r.id for r in msg_o.role_mentions]
 
         # 3) Ziel-Rollen abfragen
-        await ctx.send("❓ Bitte erwähne **Ziel-Rollen**, die automatisch Zugriff erhalten sollen.")
+        await reply(ctx, "❓ Bitte erwähne **Ziel-Rollen**, die automatisch Zugriff erhalten sollen.")
         def check_target(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msg_t = await bot.wait_for("message", check=check_target, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         target_ids = [r.id for r in msg_t.role_mentions]
 
         # 3b) (NEU) Kanal für Live-VC-Logs (vc_log_channel) abfragen
-        await ctx.send("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+        await reply(ctx, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
         def check_vclog(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
         try:
             msg_log = await bot.wait_for("message", check=check_vclog, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.")
         vc_log_channel = msg_log.channel_mentions[0]
 
         # In guild_settings hinterlegen (Spalte 'vc_log_channel' ist bereits in Railway vorhanden)
@@ -254,20 +382,17 @@ async def setup(ctx, module: str):
             json.dumps(target_ids),
         )
 
-        return await ctx.send(
-            f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\n"
-            "Override-Rollen und Ziel-Rollen wurden gespeichert."
-        )
+        return await reply(ctx, f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\nOverride-Rollen und Ziel-Rollen wurden gespeichert.")
     
         # ─── vc_track-Setup: normalen Sprachkanal zum Tracking registrieren ─────
     if module == "vc_track":
-        await ctx.send("❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.")
+        await reply(ctx, "❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.")
         def check_chan(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
         try:
             msg_chan = await bot.wait_for("message", check=check_chan, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
         vc_channel = msg_chan.channel_mentions[0]
         # Verhindern, dass ein Kanal sowohl vc_track als auch vc_override hat
         exists_override = await db_pool.fetchval(
@@ -275,22 +400,18 @@ async def setup(ctx, module: str):
             ctx.guild.id, vc_channel.id
         )
         if exists_override:
-            return await ctx.send(
-                f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. "
-                "Bitte zuerst `!disable vc_override` (optional mit Kanal) ausführen oder einen anderen Kanal wählen."
-            )
-
+            return await reply(ctx, f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. Bitte zuerst `!disable vc_override` (optional mit Kanal) ausführen oder einen anderen Kanal wählen.")
 
         # Sicherstellen, dass es einen Log-Kanal gibt (für Live-Embed)
         cfg = await get_guild_cfg(ctx.guild.id)
         if not cfg.get("vc_log_channel"):
-            await ctx.send("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+            await reply(ctx, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
             def check_vclog(m: discord.Message):
                 return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
             try:
                 msg_log = await bot.wait_for("message", check=check_vclog, timeout=60)
             except asyncio.TimeoutError:
-                return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
+                return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.")
             log_ch = msg_log.channel_mentions[0]
             await update_guild_cfg(ctx.guild.id, vc_log_channel=log_ch.id)
 
@@ -300,64 +421,59 @@ async def setup(ctx, module: str):
             ctx.guild.id, vc_channel.id
         )
         if exists:
-            return await ctx.send(f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.")
+            return await reply(ctx, f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.")
 
         await db_pool.execute(
             "INSERT INTO vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
             ctx.guild.id, vc_channel.id
         )
 
-        return await ctx.send(f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.")
+        return await reply(ctx, f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.")
 
     # ─── Autorole-Setup: Standard-Rolle abfragen und speichern ──────────────
     if module == "autorole":
-        await ctx.send("❓ Bitte erwähne die Rolle, die neuen Mitgliedern automatisch zugewiesen werden soll.")
+        await reply(ctx, "❓ Bitte erwähne die Rolle, die neuen Mitgliedern automatisch zugewiesen werden soll.")
         def check_role(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msg_r = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup autorole` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup autorole` neu ausführen.")
         autorole = msg_r.role_mentions[0]
         await update_guild_cfg(ctx.guild.id, default_role=autorole.id)
-        return await ctx.send(f"🎉 **autorole**-Setup abgeschlossen! Neue Mitglieder bekommen die Rolle {autorole.mention}.")
+        return await reply(ctx, f"🎉 **autorole**-Setup abgeschlossen! Neue Mitglieder bekommen die Rolle {autorole.mention}.")
 
     # ─── Gemeinsames Setup: Kanal abfragen ────────────────────────────────────
-    await ctx.send(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
+    await reply(ctx, f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.")
     def check_chan(m: discord.Message):
         return m.author == ctx.author and m.channel == ctx.channel and m.channel_mentions
     try:
         msg = await bot.wait_for("message", check=check_chan, timeout=60)
     except asyncio.TimeoutError:
-        return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
+        return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
     channel = msg.channel_mentions[0]
     await update_guild_cfg(ctx.guild.id, **{f"{module}_channel": channel.id})
 
     # ─── welcome: Trigger-Rolle abfragen ──────────────────────────────────────
     if module == "welcome":
-        await ctx.send("❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht auslöst.")
+        await reply(ctx, "❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht auslöst.")
         def check_role(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.role_mentions
         try:
             msgr = await bot.wait_for("message", check=check_role, timeout=60)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.")
         await update_guild_cfg(ctx.guild.id, welcome_role=msgr.role_mentions[0].id)
 
     # ─── welcome & leave: Template abfragen ───────────────────────────────────
     if module in ("welcome", "leave"):
-        await ctx.send(
-            f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\n"
-            "Verwende Platzhalter:\n"
-            "`{member}` → Member-Erwähnung\n"
-            "`{guild}`  → Server-Name"
-        )
+        await reply(ctx, f"✅ Kanal gesetzt auf {channel.mention}. Jetzt den Nachrichtentext eingeben.\nVerwende Platzhalter:\n`{{member}}` → Member-Erwähnung\n`{{guild}}`  → Server-Name")
         def check_txt(m: discord.Message):
             return m.author == ctx.author and m.channel == ctx.channel and m.content.strip()
         try:
             msg2 = await bot.wait_for("message", check=check_txt, timeout=300)
         except asyncio.TimeoutError:
-            return await ctx.send("⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
+            return await reply(ctx, "⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.")
 
         # Aktuelles Templates-Feld aus der DB laden und updaten
         cfg = await get_guild_cfg(ctx.guild.id)
@@ -372,7 +488,7 @@ async def setup(ctx, module: str):
         current_templates[module] = msg2.content
         await update_guild_cfg(ctx.guild.id, templates=current_templates)
 
-    await ctx.send(f"🎉 **{module}**-Setup abgeschlossen!")
+    await reply(ctx, f"🎉 **{module}**-Setup abgeschlossen!")
 
 # --- Disable Module -------------------------------------------------------
 @bot.command(name="disable")
@@ -389,16 +505,16 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
     """
     module = module.lower()
     if module not in ("welcome", "leave", "vc_override", "autorole", "vc_track"):
-        return await ctx.send("❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
+        return await reply(ctx, "❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.")
 
     guild_id = ctx.guild.id
 
     # autorole deaktivieren
     if module == "autorole":
         await update_guild_cfg(guild_id, default_role=None)
-        return await ctx.send("🗑️ Modul **autorole** wurde deaktiviert. Keine Autorole mehr gesetzt.")
-    
-        # vc_track deaktivieren
+        return await reply(ctx, "🗑️ Modul **autorole** wurde deaktiviert. Keine Autorole mehr gesetzt.")
+
+    # vc_track deaktivieren
     if module == "vc_track":
         if channels:
             removed = []
@@ -411,11 +527,11 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
                     )
                     removed.append(ch.mention)
             if removed:
-                return await ctx.send(f"🗑️ VC-Tracking entfernt für: {', '.join(removed)}")
-            return await ctx.send("ℹ️ Keine gültigen Voice-Channels angegeben.")
+                return await reply(ctx, f"🗑️ VC-Tracking entfernt für: {', '.join(removed)}")
+            return await reply(ctx, "ℹ️ Keine gültigen Voice-Channels angegeben.")
         else:
             await db_pool.execute("DELETE FROM vc_tracking WHERE guild_id=$1", guild_id)
-            return await ctx.send("🗑️ VC-Tracking für **alle** Voice-Channels entfernt.")
+            return await reply(ctx, "🗑️ VC-Tracking für **alle** Voice-Channels entfernt.")
 
     # welcome & leave: Channel und Role entfernen
     if module in ("welcome", "leave"):
@@ -436,7 +552,7 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
 
         # Update in DB
         await update_guild_cfg(guild_id, **fields)
-        return await ctx.send(f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.")
+        return await reply(ctx, f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.")
 
     # vc_override
     # wenn Channels angegeben: nur für diese löschen
@@ -448,8 +564,7 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
                 guild_id, ch.id
             )
             removed.append(ch.mention)
-        return await ctx.send(
-            f"🗑️ vc_override-Overrides für {' ,'.join(removed)} wurden entfernt."
+        return await reply(ctx, f"🗑️ vc_override-Overrides für {' ,'.join(removed)} wurden entfernt."
         )
 
     # keine Channels angegeben → alles löschen
@@ -457,7 +572,7 @@ async def disable(ctx, module: str, channels: Greedy[discord.abc.GuildChannel]):
         "DELETE FROM vc_overrides WHERE guild_id = $1",
         guild_id
     )
-    await ctx.send("🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.")
+    await reply(ctx, "🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.")
 
 # --- Lock / Unlock --------------------------------------------------------
 lock_tasks: dict[int, asyncio.Task] = {}
@@ -471,16 +586,17 @@ async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: 
     Privat: alle Rollen, die Sichtbarkeit haben, verlieren send/connect, bleiben sichtbar.
     """
     if not channels:
-        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+        return await reply(ctx, "❌ Bitte mindestens einen Kanal angeben.")
     # Zeit parsen
     try:
         hour, minute = map(int, start_time.split(":"))
     except ValueError:
-        return await ctx.send("❌ Ungültiges Format. Bitte `HH:MM` im 24h-Format.")
-    now    = datetime.now(tz=ZoneInfo("Europe/Berlin"))
+        return await reply(ctx, "❌ Ungültiges Format. Bitte `HH:MM` im 24h-Format.")
+    now = _now()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
-        target += datetime.timedelta(days=1)
+        target += timedelta(days=1)
+
     delay    = (target - now).total_seconds()
     everyone = ctx.guild.default_role
 
@@ -523,6 +639,7 @@ async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: 
 
             # Nachricht senden
             msg = tmpl.format(channel=channel.mention, time=start_time, duration=dur)
+            msg = await translate_text_for_guild(ctx.guild.id, msg)
             await channel.send(msg)
 
             # Timer und Entsperren
@@ -540,13 +657,14 @@ async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: 
                 else:
                     await channel.set_permissions(everyone, connect=None, speak=None)
 
-            await channel.send("🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
-            await ctx.send(f"🔓 {channel.mention} wurde automatisch entsperrt.")
+            text_unlocked = await translate_text_for_guild(ctx.guild.id, "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
+            await channel.send(text_unlocked)
+            await reply(ctx, f"🔓 {channel.mention} wurde automatisch entsperrt.")
             lock_tasks.pop(channel.id, None)
 
         task = bot.loop.create_task(_do_lock(ch, delay, duration))
         lock_tasks[ch.id] = task
-        await ctx.send(f"⏰ {ch.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt.")
+        await reply(ctx, f"⏰ {ch.mention} wird um {start_time} Uhr für {duration} Minuten gesperrt.")
 
 @bot.command(name="unlock")
 @commands.has_permissions(manage_channels=True)
@@ -555,7 +673,7 @@ async def unlock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
     Hebt Sperre sofort auf.
     """
     if not channels:
-        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+        return await reply(ctx, "❌ Bitte mindestens einen Kanal angeben.")
     everyone = ctx.guild.default_role
 
     cfg = await get_guild_cfg(ctx.guild.id)
@@ -586,7 +704,10 @@ async def unlock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
             else:
                 await ch.set_permissions(everyone, connect=None, speak=None)
 
-        await ch.send(tmpl.format(channel=ch.mention))
+        txt = tmpl.format(channel=ch.mention)
+        txt = await translate_text_for_guild(ctx.guild.id, txt)
+        await ch.send(txt)
+
 
 # --- Welcome & Leave ------------------------------------------------------
 @bot.event
@@ -605,6 +726,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     if channel is None:
         return
     text = tmpl.format(member=after.mention, guild=after.guild.name)
+    text = await translate_text_for_guild(after.guild.id, text)
     await channel.send(text)
 
 @bot.event
@@ -634,7 +756,8 @@ async def on_member_remove(member: discord.Member):
         pass
 
     channel = member.guild.get_channel(leave_chan)
-    text    = tmpl.format(member=member.mention, guild=member.guild.name)
+    text = tmpl.format(member=member.mention, guild=member.guild.name)
+    text = await translate_text_for_guild(member.guild.id, text)
     await channel.send(text)
 
 # --- Chat-Cleanup ---------------------------------------------------------
@@ -672,15 +795,13 @@ async def cleanup_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], days: int
     Usage: !cleanup <#Kanal…> <Tage> <Minuten>
     """
     if not channels:
-        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+        return await reply(ctx, "❌ Bitte mindestens einen Kanal angeben.")
     interval = days * 86400 + minutes * 60
     if interval <= 0:
-        return await ctx.send("❌ Ungültiges Intervall.")
+        return await reply(ctx, "❌ Ungültiges Intervall.")
 
-    await ctx.send(
-        f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} "
-        f"werden alle {days} Tage und {minutes} Minuten gelöscht."
-    )
+    await reply(ctx, f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} werden alle {days} Tage und {minutes} Minuten gelöscht.")
+    
     for ch in channels:
         if ch.id in cleanup_tasks:
             cleanup_tasks[ch.id].cancel()
@@ -688,7 +809,7 @@ async def cleanup_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], days: int
         async def _loop_cleanup(channel: discord.TextChannel, interval_s: float):
             await _purge_all(channel)
             try:
-                await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+                await channel.send(await translate_text_for_guild(channel.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht."))
             except discord.Forbidden:
                 pass
 
@@ -698,14 +819,15 @@ async def cleanup_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], days: int
                     await asyncio.sleep(pre)
                     wm = (interval_s - pre) / 60
                     text = (f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)")
-                    await channel.send(f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
+                    warn = await translate_text_for_guild(channel.guild.id, f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
+                    await channel.send(warn)
                     await asyncio.sleep(interval_s - pre)
                 else:
                     await asyncio.sleep(interval_s)
 
                 await _purge_all(channel)
                 try:
-                    await channel.send("🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+                    await channel.send(await translate_text_for_guild(channel.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht."))
                 except discord.Forbidden:
                     pass
 
@@ -720,14 +842,14 @@ async def cleanup_stop_cmd(ctx, channels: Greedy[discord.abc.GuildChannel]):
     Usage: !cleanup_stop <#Kanal…>
     """
     if not channels:
-        return await ctx.send("❌ Bitte mindestens einen Kanal angeben.")
+        return await reply(ctx, "❌ Bitte mindestens einen Kanal angeben.")
     for ch in channels:
         task = cleanup_tasks.pop(ch.id, None)
         if task:
             task.cancel()
-            await ctx.send(f"🛑 Automatische Löschung in {ch.mention} gestoppt.")
+            await reply(ctx, f"🛑 Automatische Löschung in {ch.mention} gestoppt.")
         else:
-            await ctx.send(f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
+            await reply(ctx, f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.")
 
 # --- VC Live Tracking / vc_log_channel (vc_override) -------------------------------------
 # Laufende Sessions pro Voice-Channel
@@ -799,6 +921,7 @@ async def _update_live_message(session: dict):
             msg: Optional[discord.Message] = session.get("message")
             if msg:
                 emb = _render_embed_payload(session)
+                emb = await translate_embed_for_guild(session["guild_id"], emb)
                 try:
                     await msg.edit(embed=emb)
                 except discord.NotFound:
@@ -842,11 +965,15 @@ async def _start_or_attach_session(member: discord.Member, vc: discord.VoiceChan
             # letzter Fallback: DM an Trigger
             try:
                 dm = await member.create_dm()
-                msg = await dm.send(embed=_render_embed_payload(sess))
+                emb = _render_embed_payload(sess)
+                emb = await translate_embed_for_guild(member.guild.id, emb)
+                msg = await dm.send(embed=emb)
             except Exception:
                 msg = None
         else:
-            msg = await target_channel.send(embed=_render_embed_payload(sess))
+            emb = _render_embed_payload(sess)
+            emb = await translate_embed_for_guild(member.guild.id, emb)
+            msg = await target_channel.send(embed=emb)
 
         sess["message"] = msg
         sess["task"] = bot.loop.create_task(_update_live_message(sess))
@@ -873,7 +1000,9 @@ async def _handle_leave(member: discord.Member, vc: discord.VoiceChannel, overri
     if still_override:
         if sess.get("message"):
             try:
-                await sess["message"].edit(embed=_render_embed_payload(sess))
+                emb = _render_embed_payload(sess)
+                emb = await translate_embed_for_guild(sess["guild_id"], emb)
+                await sess["message"].edit(embed=emb)
             except discord.NotFound:
                 pass
         return
@@ -897,6 +1026,7 @@ async def _handle_leave(member: discord.Member, vc: discord.VoiceChannel, overri
             final_emb = _render_embed_payload(sess)
             final_emb.title = "🧾 Voice‑Session (Abschluss)"
             final_emb.set_footer(text="Session beendet – letzte Override‑Rolle hat den Channel verlassen.")
+            final_emb = await translate_embed_for_guild(sess["guild_id"], final_emb)
             await sess["message"].edit(embed=final_emb)
         except discord.NotFound:
             pass
@@ -939,7 +1069,9 @@ async def _update_live_message_simple(session: dict):
             msg = session.get("message")
             if msg:
                 try:
-                    await msg.edit(embed=_render_embed_payload_simple(session))
+                    emb = _render_embed_payload_simple(session)
+                    emb = await translate_embed_for_guild(session["guild_id"], emb)
+                    await msg.edit(embed=emb)
                 except discord.NotFound:
                     break
             await asyncio.sleep(5)
@@ -972,11 +1104,15 @@ async def _start_or_attach_session_simple(member: discord.Member, vc: discord.Vo
         if target_channel is None:
             try:
                 dm = await member.create_dm()
-                msg = await dm.send(embed=_render_embed_payload_simple(sess))
+                emb = _render_embed_payload_simple(sess)
+                emb = await translate_embed_for_guild(member.guild.id, emb)
+                msg = await dm.send(embed=emb)
             except Exception:
                 msg = None
         else:
-            msg = await target_channel.send(embed=_render_embed_payload_simple(sess))
+            emb = _render_embed_payload_simple(sess)
+            emb = await translate_embed_for_guild(member.guild.id, emb)
+            msg = await target_channel.send(embed=emb)
         sess["message"] = msg
         sess["task"] = bot.loop.create_task(_update_live_message_simple(sess))
 
@@ -1009,7 +1145,9 @@ async def _handle_leave_simple(member: discord.Member, vc: discord.VoiceChannel)
     if any(not m.bot for m in vc.members):
         if sess.get("message"):
             try:
-                await sess["message"].edit(embed=_render_embed_payload_simple(sess))
+                emb = _render_embed_payload_simple(sess)
+                emb = await translate_embed_for_guild(sess["guild_id"], emb)
+                await sess["message"].edit(embed=emb)
             except discord.NotFound:
                 pass
         return
@@ -1030,6 +1168,7 @@ async def _handle_leave_simple(member: discord.Member, vc: discord.VoiceChannel)
             final = _render_embed_payload_simple(sess)
             final.title = "🧾 Voice-Session (Abschluss)"
             final.set_footer(text="Session beendet – der Channel ist jetzt leer.")
+            final = await translate_embed_for_guild(sess["guild_id"], final)
             await sess["message"].edit(embed=final)
         except discord.NotFound:
             pass
@@ -1173,7 +1312,9 @@ async def vc_live_tracker(member: discord.Member, before: discord.VoiceState, af
                 sess["accum"].setdefault(member.id, 0)
                 if sess.get("message"):
                     try:
-                        await sess["message"].edit(embed=_render_embed_payload(sess))
+                        emb = _render_embed_payload(sess)
+                        emb = await translate_embed_for_guild(sess["guild_id"], emb)
+                        await sess["message"].edit(embed=emb)
                     except discord.NotFound:
                         pass
         return
@@ -1265,7 +1406,14 @@ async def on_guild_join(guild):
 
     # Begrüßungsnachricht + Feature-Liste senden (mit 2000-Zeichen-Limit)
     if setup_channel:
-        intro_msg = f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
+        # Begrüßungsnachricht + Hinweis auf Sprache
+        intro_msg = (
+            f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
+            "🌐 Bitte **zuerst die Sprache festlegen** (nur Admins): `!setlang de` oder `!setlang en`.\n"
+            "Solange das nicht passiert, sind alle anderen Befehle gesperrt.\n\n"
+            "🌐 Please **choose the language first** (admins only): `!setlang de` or `!setlang en`.\n"
+            "Until then, all other commands are locked.\n\n"
+        )
         if len(intro_msg + features_text) <= 2000:
             await setup_channel.send(intro_msg + features_text)
         else:
@@ -1289,7 +1437,7 @@ async def list_features(ctx):
     """Zeigt die aktuelle Feature-Liste aus features.json an (schöne Embed-Variante)."""
     features = load_features()
     if not features:
-        return await ctx.send("Keine Features eingetragen.")
+        return await reply(ctx, "Keine Features eingetragen.")
 
     embeds = []
     current_embed = discord.Embed(
@@ -1322,6 +1470,7 @@ async def list_features(ctx):
 
     # Alle Embeds senden
     for embed in embeds:
+        embed = await translate_embed_for_guild(ctx.guild.id, embed)
         await ctx.send(embed=embed)
 
 # Ablaufdatum des GitHub-Tokens (Format: YYYY-MM-DD) – kommt aus Railway Env
@@ -1390,12 +1539,12 @@ def commit_feature_file():
 async def add_feature(ctx, name: str, *, description: str):
     """Fügt ein neues Feature zur Liste hinzu (nur Bot-Owner, mit GitHub-Commit)."""
     if ctx.author.id != BOT_OWNER_ID:
-        return await ctx.send("❌ Du darfst diesen Befehl nicht nutzen.")
+        return await reply(ctx, "❌ Du darfst diesen Befehl nicht nutzen.")
     
     features = load_features()
     if any(f[0].lower() == name.lower() for f in features):
-        return await ctx.send(f"⚠️ Feature `{name}` existiert bereits.")
-    
+        return await reply(ctx, f"⚠️ Feature `{name}` existiert bereits.")
+
     # Neues Feature hinzufügen
     features.append([name, description])
     save_features(features)
@@ -1403,9 +1552,9 @@ async def add_feature(ctx, name: str, *, description: str):
     # In GitHub committen
     success, message = commit_feature_file()
     if success:
-        await ctx.send(f"✅ Feature `{name}` hinzugefügt.\n📤 {message}")
+        await reply(ctx, f"✅ Feature `{name}` hinzugefügt.\n📤 {message}")
     else:
-        await ctx.send(f"⚠️ Feature `{name}` wurde lokal gespeichert, aber nicht zu GitHub gepusht.\nGrund: {message}")
+        await reply(ctx, f"⚠️ Feature `{name}` wurde lokal gespeichert, aber nicht zu GitHub gepusht.\nGrund: {message}")
 
     # Warnung bei bald ablaufendem Token
     await warn_if_token_expiring(ctx)
