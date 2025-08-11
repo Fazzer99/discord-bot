@@ -477,7 +477,7 @@ async def lock_cmd(ctx, channels: Greedy[discord.abc.GuildChannel], start_time: 
         hour, minute = map(int, start_time.split(":"))
     except ValueError:
         return await ctx.send("❌ Ungültiges Format. Bitte `HH:MM` im 24h-Format.")
-    now    = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    now    = datetime.now(tz=ZoneInfo("Europe/Berlin"))
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += datetime.timedelta(days=1)
@@ -616,7 +616,7 @@ async def on_member_remove(member: discord.Member):
         return
 
     # Kick- und Ban-Check
-    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    now = datetime.now(tz=ZoneInfo("Europe/Berlin"))
     kicked = False
     try:
         async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
@@ -646,7 +646,7 @@ def _compute_pre_notify(interval: float) -> float | None:
     return None
 
 def age_seconds(msg: discord.Message) -> float:
-    now = datetime.datetime.now(tz=msg.created_at.tzinfo)
+    now = datetime.now(tz=msg.created_at.tzinfo)
     return (now - msg.created_at).total_seconds()
 
 async def _purge_all(channel: discord.TextChannel):
@@ -754,7 +754,7 @@ def _fmt_dur(total_seconds: int) -> str:
 def _now():
     # Zeitzone Berlin, falls verfügbar
     tz = ZoneInfo("Europe/Berlin") if ZoneInfo else None
-    return datetime.datetime.now(tz=tz)
+    return datetime.now(tz=tz)
 
 def _render_embed_payload(session: dict) -> discord.Embed:
     guild = bot.get_guild(session["guild_id"])
