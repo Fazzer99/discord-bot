@@ -1926,6 +1926,7 @@ async def on_message(message: discord.Message):
 
     # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
     for rule, _unused in actions_triggered:
+        steps_done = []
         now = discord.utils.utcnow()
         # ✅ Debounce: pro Regel nur 1 Aktion in kurzer Zeit
         if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
