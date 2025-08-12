@@ -206,6 +206,22 @@ def build_feature_list():
     features = load_features()
     return "\n\n".join(f"• **{name}**\n{desc}" for name, desc in features)
 
+# --- Environment & Bot ----------------------------------------------------
+load_dotenv()
+TOKEN  = os.getenv("DISCORD_TOKEN")
+DB_URL = os.getenv("DATABASE_URL")
+
+if TOKEN is None:
+    raise RuntimeError("Discord-Token nicht gefunden. Stelle sicher, dass .env korrekt ist.")
+if DB_URL is None:
+    raise RuntimeError("DATABASE_URL nicht gefunden. Bitte PostgreSQL-Plugin in Railway prüfen.")
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members         = True  # für Member-Events benötigt
+bot = commands.Bot(command_prefix="!", intents=intents)
+db_pool: asyncpg.Pool | None = None
+
 @bot.command(name="modsetup")
 @commands.has_permissions(manage_guild=True)
 async def modsetup(ctx, preset: str = None, log_channel: discord.TextChannel = None):
@@ -224,7 +240,6 @@ async def modsetup(ctx, preset: str = None, log_channel: discord.TextChannel = N
         ctx,
         f"✅ Moderation-Setup gespeichert!\nPreset: **{preset}**\nLog-Kanal: {log_channel.mention}"
     )
-
 
 @bot.command(name="modshow")
 @commands.has_permissions(manage_guild=True)
@@ -246,22 +261,6 @@ async def modshow(ctx):
     embed.add_field(name="Regeln", value=rules_text or "-", inline=False)
 
     return await ctx.send(embed=embed)
-
-# --- Environment & Bot ----------------------------------------------------
-load_dotenv()
-TOKEN  = os.getenv("DISCORD_TOKEN")
-DB_URL = os.getenv("DATABASE_URL")
-
-if TOKEN is None:
-    raise RuntimeError("Discord-Token nicht gefunden. Stelle sicher, dass .env korrekt ist.")
-if DB_URL is None:
-    raise RuntimeError("DATABASE_URL nicht gefunden. Bitte PostgreSQL-Plugin in Railway prüfen.")
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members         = True  # für Member-Events benötigt
-bot = commands.Bot(command_prefix="!", intents=intents)
-db_pool: asyncpg.Pool | None = None
 
 @bot.check
 async def ensure_lang_set(ctx):
