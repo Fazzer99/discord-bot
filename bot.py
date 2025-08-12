@@ -1925,12 +1925,19 @@ async def on_message(message: discord.Message):
                 break
 
     # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
-    for rule, _unused in actions_triggered:
-        steps_done = []
+    # (1) Regeln als Set, um doppelte Einträge zu vermeiden
+    triggered_rules = {rule for rule, _unused in actions_triggered}
+
+    for rule in triggered_rules:
+        steps_done: list[str] = []                      # <- INIT
+        content_snapshot = message.content or ""        # <- INIT
         now = discord.utils.utcnow()
-        # ✅ Debounce: pro Regel nur 1 Aktion in kurzer Zeit
+
+        # ✅ Debounce: pro Regel nur 1 Aktion im kurzen Fenster
         if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
             continue
+        # WICHTIG: sofort markieren, damit parallele Events nicht 2x auslösen
+        _mark_enforced(message.guild.id, message.author.id, rule, now)
 
         # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
         if rule in ("spam", "mentions", "badwords", "invites"):
@@ -1950,7 +1957,6 @@ async def on_message(message: discord.Message):
             pass
 
         # 3) Exponentieller Timeout: 1m → 5m → 15m → 60m (Cap, Reset nach Cooldown)
-        now = discord.utils.utcnow()
         secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
         try:
             await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
@@ -1958,7 +1964,7 @@ async def on_message(message: discord.Message):
         except discord.HTTPException:
             pass
 
-        # 4) DB-Log + Embed in Log-Kanal
+        # 4) DB-Log
         try:
             await db_pool.execute(
                 """
@@ -1975,7 +1981,7 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-        # schönes Embed in den Log-Kanal
+        # 5) Schönes Embed in den Log-Kanal
         emb = _build_modlog_embed(
             message.guild,
             message.author,
