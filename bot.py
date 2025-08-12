@@ -210,6 +210,57 @@ def _next_timeout_secs(guild_id: int, user_id: int, rule: str, now: datetime) ->
     AUTOMOD_STRIKES[key] = {"count": count, "last": now}
     return secs
 
+# --------- Modlog Helpers (Embed + Sender) ---------
+async def _send_modlog_embed(guild: discord.Guild, embed: discord.Embed) -> None:
+    """Sendet ein Moderations-Embed in den in mod_settings konfigurierten Log-Kanal (falls gesetzt)."""
+    try:
+        settings = await get_mod_settings(guild.id)
+        log_id = int(settings.get("log_channel") or 0)
+        if not log_id:
+            return
+        ch = guild.get_channel(log_id)
+        if not isinstance(ch, discord.TextChannel):
+            return
+        # DE→EN falls nötig
+        embed = await translate_embed_for_guild(guild.id, embed)
+        await ch.send(embed=embed)
+    except Exception:
+        # leise schlucken – Logs sollen niemals den Flow crashen
+        pass
+
+def _build_modlog_embed(
+    guild: discord.Guild,
+    user: discord.Member,
+    channel: discord.abc.GuildChannel,
+    rule: str,
+    steps: list[str],
+    content_snapshot: str,
+    timeout_secs: int | None = None
+) -> discord.Embed:
+    """Baut ein hübsches Log-Embed für Automod-Aktionen."""
+    title = "🛡️ AutoMod"
+    if timeout_secs:
+        title += f" – Timeout ({timeout_secs//60}m)"
+    elif "warn" in steps:
+        title += " – Warnung"
+    elif "delete" in steps:
+        title += " – Nachricht gelöscht"
+
+    emb = discord.Embed(title=title, color=discord.Color.orange())
+    emb.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+    emb.add_field(name="Channel", value=f"{channel.mention} (`{channel.id}`)", inline=False)
+    emb.add_field(name="Regel", value=rule, inline=True)
+    emb.add_field(name="Aktionen", value=", ".join(steps), inline=True)
+
+    # Nachricht (gekürzt)
+    snap = (content_snapshot or "").strip()
+    if len(snap) > 300:
+        snap = snap[:297] + "…"
+    emb.add_field(name="Nachricht", value=(snap or "—"), inline=False)
+
+    emb.set_footer(text=datetime.now(timezone.utc).strftime("UTC %Y-%m-%d %H:%M:%S"))
+    return emb
+
 # Deine eigene Discord-User-ID 
 BOT_OWNER_ID = 693861343014551623
 
@@ -1851,31 +1902,38 @@ async def on_message(message: discord.Message):
                 actions_triggered.append(("badwords", badwords_cfg["escalation"]))
                 break
 
-    # Maßnahmen umsetzen (exponentielle Timeouts + übersetzte Warnungen)
-    for rule, _escalation_unused in actions_triggered:
-        # 1) Nachricht löschen (wo sinnvoll: spam, mentions, badwords)
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
+    # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
+    for rule, _unused in actions_triggered:
+        steps_done: list[str] = []
+        content_snapshot = message.content  # sichern, bevor wir löschen
 
-        # 2) Warnung (zweisprachig über deinen Übersetzungs-Flow)
+        # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
+        if rule in ("spam", "mentions", "badwords", "invites"):
+            try:
+                await message.delete()
+                steps_done.append("delete")
+            except discord.HTTPException:
+                pass
+
+        # 2) Warnung (zweisprachig)
         warn_de = f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!"
         warn_txt = await translate_text_for_guild(message.guild.id, warn_de)
         try:
             await message.channel.send(warn_txt)
+            steps_done.append("warn")
         except discord.HTTPException:
             pass
 
-        # 3) Exponentieller Timeout: 1m -> 5m -> 15m -> 60m (Cap), Reset nach Cooldown
+        # 3) Exponentieller Timeout: 1m → 5m → 15m → 60m (Cap, Reset nach Cooldown)
         now = discord.utils.utcnow()
         secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
         try:
             await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
+            steps_done.append(f"timeout:{secs}")
         except discord.HTTPException:
             pass
 
-        # 4) Logging (mod_logs + optional infractions)
+        # 4) DB-Log + Embed in Log-Kanal
         try:
             await db_pool.execute(
                 """
@@ -1886,27 +1944,23 @@ async def on_message(message: discord.Message):
                 message.channel.id,
                 message.author.id,
                 rule,
-                f"delete,warn,timeout:{secs}",
-                json.dumps({"content": message.content}),
-            )
-            await db_pool.execute(
-                """
-                INSERT INTO infractions (guild_id, user_id, moderator_id, kind, reason, duration_sec, channel_id, message_id)
-                VALUES ($1, $2, NULL, $3, $4, $5, $6, $7)
-                """,
-                message.guild.id,
-                message.author.id,
-                "automod_timeout",
-                f"{rule}",
-                secs,
-                message.channel.id,
-                message.id,
+                ",".join(steps_done),
+                json.dumps({"content": content_snapshot}),
             )
         except Exception:
             pass
 
-    # Damit Commands noch reagieren
-    await bot.process_commands(message)
+        # schönes Embed in den Log-Kanal
+        emb = _build_modlog_embed(
+            message.guild,
+            message.author,
+            message.channel,
+            rule,
+            steps_done,
+            content_snapshot,
+            timeout_secs=secs if any(s.startswith("timeout:") for s in steps_done) else None
+        )
+        await _send_modlog_embed(message.guild, emb)
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
