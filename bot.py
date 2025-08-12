@@ -1986,6 +1986,9 @@ async def on_message(message: discord.Message):
         )
         await _send_modlog_embed(message.guild, emb)
 
+        # mark enforcement for debounce
+        _mark_enforced(message.guild.id, message.author.id, rule, now)
+
 async def _get_guild_zoneinfo(guild_id: int):
     try:
         cfg = await get_guild_cfg(guild_id)
