@@ -226,6 +226,17 @@ def _can_enforce_now(guild_id: int, user_id: int, rule: str, now: datetime) -> b
 def _mark_enforced(guild_id: int, user_id: int, rule: str, when: datetime) -> None:
     LAST_ENFORCEMENT[(guild_id, user_id, rule)] = when
 
+# Serielle Durchsetzung pro (guild, user, rule)
+ENFORCEMENT_LOCKS: dict[tuple[int, int, str], asyncio.Lock] = {}
+
+def _get_enforcement_lock(guild_id: int, user_id: int, rule: str) -> asyncio.Lock:
+    key = (guild_id, user_id, rule)
+    lock = ENFORCEMENT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        ENFORCEMENT_LOCKS[key] = lock
+    return lock
+
 # --------- Modlog Helpers (Embed + Sender) ---------
 async def _send_modlog_embed(guild: discord.Guild, embed: discord.Embed) -> None:
     """Sendet ein Moderations-Embed in den in mod_settings konfigurierten Log-Kanal (falls gesetzt)."""
@@ -1925,73 +1936,77 @@ async def on_message(message: discord.Message):
                 break
 
     # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
-    # (1) Regeln als Set, um doppelte Einträge zu vermeiden
-    triggered_rules = {rule for rule, _unused in actions_triggered}
+    # Dedupe: gleiche Regel nur 1x behandeln
+    triggered_rules = {rule for rule, _ in actions_triggered}
 
     for rule in triggered_rules:
-        steps_done: list[str] = []                      # <- INIT
-        content_snapshot = message.content or ""        # <- INIT
-        now = discord.utils.utcnow()
+        # seriell pro (guild, user, rule)
+        lock = _get_enforcement_lock(message.guild.id, message.author.id, rule)
+        async with lock:
+            now = discord.utils.utcnow()
 
-        # ✅ Debounce: pro Regel nur 1 Aktion im kurzen Fenster
-        if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
-            continue
-        # WICHTIG: sofort markieren, damit parallele Events nicht 2x auslösen
-        _mark_enforced(message.guild.id, message.author.id, rule, now)
+            # Debounce prüfen – falls gerade eben schon durchgesetzt, überspringen
+            if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
+                continue
+            # direkt markieren, damit parallel eintreffende Events geblockt sind
+            _mark_enforced(message.guild.id, message.author.id, rule, now)
 
-        # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
-        if rule in ("spam", "mentions", "badwords", "invites"):
+            steps_done: list[str] = []
+            content_snapshot = message.content or ""
+
+            # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
+            if rule in ("spam", "mentions", "badwords", "invites"):
+                try:
+                    await message.delete()
+                    steps_done.append("delete")
+                except discord.HTTPException:
+                    pass
+
+            # 2) Warnung (zweisprachig)
+            warn_de = f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!"
+            warn_txt = await translate_text_for_guild(message.guild.id, warn_de)
             try:
-                await message.delete()
-                steps_done.append("delete")
+                await message.channel.send(warn_txt)
+                steps_done.append("warn")
             except discord.HTTPException:
                 pass
 
-        # 2) Warnung (zweisprachig)
-        warn_de = f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!"
-        warn_txt = await translate_text_for_guild(message.guild.id, warn_de)
-        try:
-            await message.channel.send(warn_txt)
-            steps_done.append("warn")
-        except discord.HTTPException:
-            pass
+            # 3) Exponentieller Timeout: 1m → 5m → 15m → 60m (Reset nach Cooldown)
+            secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
+            try:
+                await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
+                steps_done.append(f"timeout:{secs}")
+            except discord.HTTPException:
+                pass
 
-        # 3) Exponentieller Timeout: 1m → 5m → 15m → 60m (Cap, Reset nach Cooldown)
-        secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
-        try:
-            await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
-            steps_done.append(f"timeout:{secs}")
-        except discord.HTTPException:
-            pass
+            # 4) DB-Log
+            try:
+                await db_pool.execute(
+                    """
+                    INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    message.guild.id,
+                    message.channel.id,
+                    message.author.id,
+                    rule,
+                    ",".join(steps_done),
+                    json.dumps({"content": content_snapshot}),
+                )
+            except Exception:
+                pass
 
-        # 4) DB-Log
-        try:
-            await db_pool.execute(
-                """
-                INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                """,
-                message.guild.id,
-                message.channel.id,
-                message.author.id,
+            # 5) Embed ins Log
+            emb = _build_modlog_embed(
+                message.guild,
+                message.author,
+                message.channel,
                 rule,
-                ",".join(steps_done),
-                json.dumps({"content": content_snapshot}),
+                steps_done,
+                content_snapshot,
+                timeout_secs=secs if any(s.startswith("timeout:") for s in steps_done) else None
             )
-        except Exception:
-            pass
-
-        # 5) Schönes Embed in den Log-Kanal
-        emb = _build_modlog_embed(
-            message.guild,
-            message.author,
-            message.channel,
-            rule,
-            steps_done,
-            content_snapshot,
-            timeout_secs=secs if any(s.startswith("timeout:") for s in steps_done) else None
-        )
-        await _send_modlog_embed(message.guild, emb)
+            await _send_modlog_embed(message.guild, emb)
 
         # mark enforcement for debounce
         _mark_enforced(message.guild.id, message.author.id, rule, now)
