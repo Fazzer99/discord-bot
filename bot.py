@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import asyncio
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from typing import Optional
 try:
     from zoneinfo import ZoneInfo
@@ -182,6 +183,32 @@ async def get_mod_settings(guild_id: int) -> dict:
 async def save_mod_settings(guild_id: int, settings: dict) -> None:
     """Speichere Moderations-Einstellungen in guild_settings.mod_settings."""
     await update_guild_cfg(guild_id, mod_settings=settings)
+
+# Cooldown-Fenster: wenn in dieser Zeit kein neuer Verstoß kommt, wird die Eskalation zurückgesetzt
+AUTOMOD_COOLDOWN_SEC = 30 * 60  # 30 Minuten
+
+# Exponentielle Leiter (in Sekunden) – 1m, 5m, 15m, 60m (Cap)
+ESCALATION_TIMEOUTS = [60, 300, 900, 3600]
+
+# In-Memory Strike-Zähler: Schlüssel = (guild_id, user_id, rule) -> {"count": int, "last": datetime}
+AUTOMOD_STRIKES: dict[tuple[int, int, str], dict] = {}
+
+def _next_timeout_secs(guild_id: int, user_id: int, rule: str, now: datetime) -> int:
+    """
+    Gibt die nächste Timeout-Dauer zurück und aktualisiert den Strike-Zähler.
+    Reset, wenn seit letztem Verstoß > AUTOCooldown vergangen ist.
+    """
+    key = (guild_id, user_id, rule)
+    data = AUTOMOD_STRIKES.get(key)
+
+    if not data or (now - data["last"]).total_seconds() > AUTOMOD_COOLDOWN_SEC:
+        count = 0
+    else:
+        count = min((data.get("count", 0) + 1), len(ESCALATION_TIMEOUTS) - 1)
+
+    secs = ESCALATION_TIMEOUTS[count]
+    AUTOMOD_STRIKES[key] = {"count": count, "last": now}
+    return secs
 
 # Deine eigene Discord-User-ID 
 BOT_OWNER_ID = 693861343014551623
@@ -1711,42 +1738,59 @@ async def on_message(message: discord.Message):
                 actions_triggered.append(("badwords", badwords_cfg["escalation"]))
                 break
 
-    # Maßnahmen umsetzen
-    for rule, escalation in actions_triggered:
-        for step in escalation:
-            if step == "delete":
-                try:
-                    await message.delete()
-                except discord.HTTPException:
-                    pass
-            elif step == "warn":
-                await message.channel.send(f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!")
-            elif step.startswith("timeout:"):
-                secs = int(step.split(":")[1])
-                try:
-                    await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
-                except discord.HTTPException:
-                    pass
-            elif step == "kick":
-                try:
-                    await message.guild.kick(message.author, reason=f"Automod: {rule}")
-                except discord.HTTPException:
-                    pass
-            elif step == "ban":
-                try:
-                    await message.guild.ban(message.author, reason=f"Automod: {rule}")
-                except discord.HTTPException:
-                    pass
+    # Maßnahmen umsetzen (exponentielle Timeouts + übersetzte Warnungen)
+    for rule, _escalation_unused in actions_triggered:
+        # 1) Nachricht löschen (wo sinnvoll: spam, mentions, badwords)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
 
-        # In Logs eintragen
-        await db_pool.execute(
-            """
-            INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            message.guild.id, message.channel.id, message.author.id,
-            rule, ",".join(escalation), json.dumps({"content": message.content}),
-        )
+        # 2) Warnung (zweisprachig über deinen Übersetzungs-Flow)
+        warn_de = f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!"
+        warn_txt = await translate_text_for_guild(message.guild.id, warn_de)
+        try:
+            await message.channel.send(warn_txt)
+        except discord.HTTPException:
+            pass
+
+        # 3) Exponentieller Timeout: 1m -> 5m -> 15m -> 60m (Cap), Reset nach Cooldown
+        now = discord.utils.utcnow()
+        secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
+        try:
+            await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
+        except discord.HTTPException:
+            pass
+
+        # 4) Logging (mod_logs + optional infractions)
+        try:
+            await db_pool.execute(
+                """
+                INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                message.guild.id,
+                message.channel.id,
+                message.author.id,
+                rule,
+                f"delete,warn,timeout:{secs}",
+                json.dumps({"content": message.content}),
+            )
+            await db_pool.execute(
+                """
+                INSERT INTO infractions (guild_id, user_id, moderator_id, kind, reason, duration_sec, channel_id, message_id)
+                VALUES ($1, $2, NULL, $3, $4, $5, $6, $7)
+                """,
+                message.guild.id,
+                message.author.id,
+                "automod_timeout",
+                f"{rule}",
+                secs,
+                message.channel.id,
+                message.id,
+            )
+        except Exception:
+            pass
 
     # Damit Commands noch reagieren
     await bot.process_commands(message)
