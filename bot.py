@@ -319,6 +319,9 @@ def build_feature_list():
 
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
+
+DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
+DEEPL_KEY = os.getenv("DEEPL_API_KEY")
 TOKEN  = os.getenv("DISCORD_TOKEN")
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -420,6 +423,63 @@ async def modbadword(ctx, action: str = None, *, payload: str = None):
     if not action:
         return await reply(ctx, "❌ Nutzung: `!modbadword <list|add|remove|import|clear> [Werte]`")
     
+    action = (action or "").lower().strip()
+
+    # LIST
+    if action == "list":
+        words = await _get_badwords(ctx.guild.id)
+        if not words:
+            return await reply(ctx, "ℹ️ Es sind derzeit **keine** Badwords eingetragen.")
+        show = ", ".join(words[:50])
+        more = f"\n… +{len(words)-50} weitere" if len(words) > 50 else ""
+        return await reply(ctx, f"📄 Badwords ({len(words)}): {show}{more}")
+
+    # ADD
+    if action == "add":
+        w = _normalize_word(payload or "")
+        if not w:
+            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword add <wort>`")
+        words = await _get_badwords(ctx.guild.id)
+        if w in words:
+            return await reply(ctx, f"ℹ️ `{w}` ist bereits in der Liste.")
+        words.append(w)
+        await _set_badwords(ctx.guild.id, words)
+        return await reply(ctx, f"✅ `{w}` wurde hinzugefügt. (jetzt {len(words)})")
+
+    # REMOVE
+    if action == "remove":
+        w = _normalize_word(payload or "")
+        if not w:
+            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword remove <wort>`")
+        words = await _get_badwords(ctx.guild.id)
+        if w not in words:
+            return await reply(ctx, f"ℹ️ `{w}` ist nicht in der Liste.")
+        words = [x for x in words if x != w]
+        await _set_badwords(ctx.guild.id, words)
+        return await reply(ctx, f"🗑️ `{w}` wurde entfernt. (jetzt {len(words)})")
+
+    # IMPORT (kommagetrennt)
+    if action == "import":
+        if not payload:
+            return await reply(ctx, "❌ Bitte Wörter angeben: `!modbadword import wort1, wort2, ...`")
+        parts = [p.strip() for p in payload.split(",")]
+        words = await _get_badwords(ctx.guild.id)
+        before = len(words)
+        for p in parts:
+            p = _normalize_word(p)
+            if p and p not in words:
+                words.append(p)
+        await _set_badwords(ctx.guild.id, words)
+        diff = len(words) - before
+        return await reply(ctx, f"✅ Import abgeschlossen. **{diff}** neue Wörter hinzugefügt. (jetzt {len(words)})")
+
+    # CLEAR
+    if action == "clear":
+        await _set_badwords(ctx.guild.id, [])
+        return await reply(ctx, "🧼 Liste geleert.")
+
+    return await reply(ctx, "❌ Unbekannte Aktion. Nutze: `list`, `add`, `remove`, `import`")
+    
     # ---- Exempt Management (Users/Roles/Channels) ----------------------------
 
 def _norm_kind(kind: str) -> str | None:
@@ -511,62 +571,6 @@ async def modexempt(ctx, action: str = None, kind: str = None, *, value: str = N
         await _set_exempt_lists(ctx.guild.id, ex)
         mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
         return await reply(ctx, f"🗑️ Entfernt aus **{k}**: {mention}")
-
-    action = action.lower().strip()
-
-    # LIST
-    if action == "list":
-        words = await _get_badwords(ctx.guild.id)
-        if not words:
-            return await reply(ctx, "ℹ️ Es sind derzeit **keine** Badwords eingetragen.")
-        # kompakt anzeigen (max 50 pro Nachricht)
-        show = ", ".join(words[:50])
-        more = f"\n… +{len(words)-50} weitere" if len(words) > 50 else ""
-        return await reply(ctx, f"📄 Badwords ({len(words)}): {show}{more}")
-
-    # ADD
-    if action == "add":
-        w = _normalize_word(payload or "")
-        if not w:
-            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword add <wort>`")
-        words = await _get_badwords(ctx.guild.id)
-        if w in words:
-            return await reply(ctx, f"ℹ️ `{w}` ist bereits in der Liste.")
-        words.append(w)
-        await _set_badwords(ctx.guild.id, words)
-        return await reply(ctx, f"✅ `{w}` wurde hinzugefügt. (jetzt {len(words)})")
-
-    # REMOVE
-    if action == "remove":
-        w = _normalize_word(payload or "")
-        if not w:
-            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword remove <wort>`")
-        words = await _get_badwords(ctx.guild.id)
-        if w not in words:
-            return await reply(ctx, f"ℹ️ `{w}` ist nicht in der Liste.")
-        words = [x for x in words if x != w]
-        await _set_badwords(ctx.guild.id, words)
-        return await reply(ctx, f"🗑️ `{w}` wurde entfernt. (jetzt {len(words)})")
-
-    # IMPORT (kommagetrennt)
-    if action == "import":
-        if not payload:
-            return await reply(ctx, "❌ Bitte Wörter angeben: `!modbadword import wort1, wort2, ...`")
-        parts = [p.strip() for p in payload.split(",")]
-        words = await _get_badwords(ctx.guild.id)
-        before = len(words)
-        for p in parts:
-            p = _normalize_word(p)
-            if p and p not in words:
-                words.append(p)
-        await _set_badwords(ctx.guild.id, words)
-        diff = len(words) - before
-        return await reply(ctx, f"✅ Import abgeschlossen. **{diff}** neue Wörter hinzugefügt. (jetzt {len(words)})")
-
-    # CLEAR
-    if action == "clear":
-        await _set_badwords(ctx.guild.id, [])
-        return await reply(ctx, "🧼 Liste geleert.")
 
     return await reply(ctx, "❌ Unbekannte Aktion. Nutze: `list`, `add`, `remove`, `import`, `clear`")
 
