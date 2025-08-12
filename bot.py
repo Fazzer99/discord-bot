@@ -419,6 +419,98 @@ async def modbadword(ctx, action: str = None, *, payload: str = None):
     """
     if not action:
         return await reply(ctx, "❌ Nutzung: `!modbadword <list|add|remove|import|clear> [Werte]`")
+    
+    # ---- Exempt Management (Users/Roles/Channels) ----------------------------
+
+def _norm_kind(kind: str) -> str | None:
+    if not kind:
+        return None
+    k = kind.lower().strip()
+    if k in ("user", "member", "u"):
+        return "users"
+    if k in ("role", "r"):
+        return "roles"
+    if k in ("channel", "chan", "c"):
+        return "channels"
+    return None
+
+async def _get_exempt_lists(guild_id: int) -> dict:
+    s = await get_mod_settings(guild_id)
+    ex = s.get("exempt") or {}
+    ex.setdefault("users", [])
+    ex.setdefault("roles", [])
+    ex.setdefault("channels", [])
+    return ex
+
+async def _set_exempt_lists(guild_id: int, ex: dict) -> None:
+    s = await get_mod_settings(guild_id)
+    s["exempt"] = {
+        "users":    list({int(x) for x in ex.get("users", [])}),
+        "roles":    list({int(x) for x in ex.get("roles", [])}),
+        "channels": list({int(x) for x in ex.get("channels", [])}),
+    }
+    await save_mod_settings(guild_id, s)
+
+def _id_from_mention_or_id(arg: str) -> int | None:
+    if not arg:
+        return None
+    arg = arg.strip()
+    # <@123>, <@!123>, <#123>, <@&123>, raw "123"
+    digits = "".join(ch for ch in arg if ch.isdigit())
+    return int(digits) if digits else None
+
+@bot.command(name="modexempt")
+@commands.has_permissions(manage_guild=True)
+async def modexempt(ctx, action: str = None, kind: str = None, *, value: str = None):
+    """
+    Verwalte Ausnahmen (Whitelist) für die Automod.
+    Nutzung:
+      !modexempt list
+      !modexempt add user|role|channel <@mention|ID>
+      !modexempt remove user|role|channel <@mention|ID>
+    """
+    if not action:
+        return await reply(ctx, "❌ Nutzung: `!modexempt <list|add|remove> [user|role|channel] [@/ID]`")
+
+    action = action.lower().strip()
+
+    # LIST
+    if action == "list":
+        ex = await _get_exempt_lists(ctx.guild.id)
+        u = ", ".join(f"<@{i}>" for i in ex["users"]) or "—"
+        r = ", ".join(f"<@&{i}>" for i in ex["roles"]) or "—"
+        c = ", ".join(f"<#{i}>" for i in ex["channels"]) or "—"
+        return await reply(ctx, f"📄 **Exempt**\nUsers: {u}\nRoles: {r}\nChannels: {c}")
+
+    # ADD / REMOVE
+    k = _norm_kind(kind)
+    if action not in ("add", "remove") or not k:
+        return await reply(ctx, "❌ Nutzung: `!modexempt add|remove user|role|channel <@/ID>`")
+
+    # ID aus Mention/ID ziehen – wenn mention leer ist, versuche aus message zu lesen
+    target_id = _id_from_mention_or_id(value or "")
+    if not target_id:
+        return await reply(ctx, "❌ Bitte eine gültige Erwähnung oder ID angeben.")
+
+    ex = await _get_exempt_lists(ctx.guild.id)
+    items = set(int(x) for x in ex[k])
+
+    if action == "add":
+        items.add(target_id)
+        ex[k] = list(items)
+        await _set_exempt_lists(ctx.guild.id, ex)
+        mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
+        return await reply(ctx, f"✅ Hinzugefügt zu **{k}**: {mention}")
+
+    if action == "remove":
+        if target_id not in items:
+            mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
+            return await reply(ctx, f"ℹ️ Nicht in **{k}** enthalten: {mention}")
+        items.remove(target_id)
+        ex[k] = list(items)
+        await _set_exempt_lists(ctx.guild.id, ex)
+        mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
+        return await reply(ctx, f"🗑️ Entfernt aus **{k}**: {mention}")
 
     action = action.lower().strip()
 
