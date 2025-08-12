@@ -210,6 +210,22 @@ def _next_timeout_secs(guild_id: int, user_id: int, rule: str, now: datetime) ->
     AUTOMOD_STRIKES[key] = {"count": count, "last": now}
     return secs
 
+# Verhindert Mehrfach-Aktionen in kurzer Zeit (z. B. 2 Timeouts in 1-2s)
+ENFORCEMENT_DEBOUNCE_SEC = 4  # pro (guild, user, rule)
+
+# (guild_id, user_id, rule) -> datetime (letzte Durchsetzung)
+LAST_ENFORCEMENT: dict[tuple[int, int, str], datetime] = {}
+
+def _can_enforce_now(guild_id: int, user_id: int, rule: str, now: datetime) -> bool:
+    key = (guild_id, user_id, rule)
+    last = LAST_ENFORCEMENT.get(key)
+    if not last:
+        return True
+    return (now - last).total_seconds() >= ENFORCEMENT_DEBOUNCE_SEC
+
+def _mark_enforced(guild_id: int, user_id: int, rule: str, when: datetime) -> None:
+    LAST_ENFORCEMENT[(guild_id, user_id, rule)] = when
+
 # --------- Modlog Helpers (Embed + Sender) ---------
 async def _send_modlog_embed(guild: discord.Guild, embed: discord.Embed) -> None:
     """Sendet ein Moderations-Embed in den in mod_settings konfigurierten Log-Kanal (falls gesetzt)."""
@@ -221,6 +237,12 @@ async def _send_modlog_embed(guild: discord.Guild, embed: discord.Embed) -> None
         ch = guild.get_channel(log_id)
         if not isinstance(ch, discord.TextChannel):
             return
+        
+        # Lokale Zeit ermitteln und Footer setzen (überschreibt evtl. vorhandenen)
+        tz = await _get_guild_zoneinfo(guild.id)
+        local_now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+        embed.set_footer(text=local_now)
+
         # DE→EN falls nötig
         embed = await translate_embed_for_guild(guild.id, embed)
         await ch.send(embed=embed)
@@ -1904,8 +1926,10 @@ async def on_message(message: discord.Message):
 
     # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
     for rule, _unused in actions_triggered:
-        steps_done: list[str] = []
-        content_snapshot = message.content  # sichern, bevor wir löschen
+        now = discord.utils.utcnow()
+        # ✅ Debounce: pro Regel nur 1 Aktion in kurzer Zeit
+        if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
+            continue
 
         # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
         if rule in ("spam", "mentions", "badwords", "invites"):
@@ -1961,6 +1985,17 @@ async def on_message(message: discord.Message):
             timeout_secs=secs if any(s.startswith("timeout:") for s in steps_done) else None
         )
         await _send_modlog_embed(message.guild, emb)
+
+async def _get_guild_zoneinfo(guild_id: int):
+    try:
+        cfg = await get_guild_cfg(guild_id)
+        tz = (cfg.get("tz") or "Europe/Berlin").strip()
+        try:
+            return ZoneInfo(tz)
+        except Exception:
+            return ZoneInfo("UTC")
+    except Exception:
+        return ZoneInfo("UTC")
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
