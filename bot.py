@@ -1891,6 +1891,7 @@ async def on_message(message: discord.Message):
     member = message.author
     try:
         if member.id == message.guild.owner_id or member.guild_permissions.administrator:
+            await bot.process_commands(message)
             return
     except Exception:
         pass
@@ -2010,6 +2011,8 @@ async def on_message(message: discord.Message):
 
         # mark enforcement for debounce
         _mark_enforced(message.guild.id, message.author.id, rule, now)
+
+    await bot.process_commands(message)
 
 async def _get_guild_zoneinfo(guild_id: int):
     try:
