@@ -118,6 +118,71 @@ async def reply(ctx, text_de: str, **fmt):
         rendered = rendered_de
     return await ctx.send(rendered)
 
+# -------------------- Moderation: Presets & Helpers --------------------
+
+# Preset-Definitionen (du kannst die Werte später jederzeit anpassen)
+MOD_PRESETS = {
+    "lenient": {
+        "spam":     {"max_msgs": 10, "window_sec": 7, "escalation": ["delete", "warn"]},
+        "mentions": {"max_per_msg": 8,  "escalation": ["delete", "warn"]},
+        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "warn"]},
+        "invites":  {"block": True, "escalation": ["delete", "warn"]},
+        "caps":     {"min_len": 12, "ratio": 0.8, "escalation": ["warn"]},
+        "emoji":    {"max": 10, "escalation": ["warn"]},
+    },
+    "balanced": {
+        "spam":     {"max_msgs": 6, "window_sec": 5, "escalation": ["delete", "warn", "timeout:600", "timeout:3600"]},
+        "mentions": {"max_per_msg": 5, "escalation": ["delete", "warn", "timeout:600"]},
+        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "warn", "timeout:600"]},
+        "invites":  {"block": True, "escalation": ["delete", "warn"]},
+        "caps":     {"min_len": 12, "ratio": 0.7, "escalation": ["warn"]},
+        "emoji":    {"max": 8, "escalation": ["warn"]},
+    },
+    "strict": {
+        "spam":     {"max_msgs": 4, "window_sec": 4, "escalation": ["delete", "warn", "timeout:900", "timeout:3600"]},
+        "mentions": {"max_per_msg": 3, "escalation": ["delete", "warn", "timeout:900"]},
+        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "timeout:900"]},
+        "invites":  {"block": True, "escalation": ["delete", "warn", "timeout:600"]},
+        "caps":     {"min_len": 12, "ratio": 0.6, "escalation": ["warn", "timeout:300"]},
+        "emoji":    {"max": 5, "escalation": ["warn"]},
+    },
+}
+
+def _build_mod_settings(preset: str = "balanced", log_channel: int = 0) -> dict:
+    # "custom" startet identisch wie balanced, ist aber als preset "custom" markiert
+    from copy import deepcopy
+    base = deepcopy(MOD_PRESETS.get(preset if preset != "custom" else "balanced", MOD_PRESETS["balanced"]))
+    return {
+        "enabled": True,
+        "preset": preset,
+        "log_channel": int(log_channel or 0),
+        "rules": base,
+        "exempt": {"roles": [], "channels": [], "users": []},
+    }
+
+async def get_mod_settings(guild_id: int) -> dict:
+    """Hole aktuelle Moderations-Einstellungen für die Guild. Fällt auf balanced zurück."""
+    cfg = await get_guild_cfg(guild_id)
+    raw = (cfg or {}).get("mod_settings") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if not raw:
+        return _build_mod_settings("balanced", 0)
+    # Minimal-Defaults ergänzen, falls ältere Struktur
+    raw.setdefault("enabled", True)
+    raw.setdefault("preset", "balanced")
+    raw.setdefault("log_channel", 0)
+    raw.setdefault("rules", MOD_PRESETS["balanced"])
+    raw.setdefault("exempt", {"roles": [], "channels": [], "users": []})
+    return raw
+
+async def save_mod_settings(guild_id: int, settings: dict) -> None:
+    """Speichere Moderations-Einstellungen in guild_settings.mod_settings."""
+    await update_guild_cfg(guild_id, mod_settings=settings)
+
 # Deine eigene Discord-User-ID 
 BOT_OWNER_ID = 693861343014551623
 
@@ -140,6 +205,47 @@ def build_feature_list():
     """Gibt eine formatierte Feature-Liste als Text zurück."""
     features = load_features()
     return "\n\n".join(f"• **{name}**\n{desc}" for name, desc in features)
+
+@bot.command(name="modsetup")
+@commands.has_permissions(manage_guild=True)
+async def modsetup(ctx, preset: str = None, log_channel: discord.TextChannel = None):
+    """Moderation-Setup: Preset + Log-Kanal setzen"""
+    valid_presets = ["lenient", "balanced", "strict", "custom"]
+    if preset is None or preset.lower() not in valid_presets or log_channel is None:
+        return await reply(
+            ctx,
+            "❌ Nutzung: `!modsetup <lenient|balanced|strict|custom> #logchannel`"
+        )
+
+    preset = preset.lower()
+    settings = _build_mod_settings(preset, log_channel.id)
+    await save_mod_settings(ctx.guild.id, settings)
+    return await reply(
+        ctx,
+        f"✅ Moderation-Setup gespeichert!\nPreset: **{preset}**\nLog-Kanal: {log_channel.mention}"
+    )
+
+
+@bot.command(name="modshow")
+@commands.has_permissions(manage_guild=True)
+async def modshow(ctx):
+    """Zeigt aktuelle Moderations-Einstellungen"""
+    settings = await get_mod_settings(ctx.guild.id)
+    embed = discord.Embed(
+        title="📋 Moderations-Einstellungen",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Aktiviert", value="✅ Ja" if settings["enabled"] else "❌ Nein", inline=False)
+    embed.add_field(name="Preset", value=settings["preset"], inline=False)
+    log_channel = ctx.guild.get_channel(settings["log_channel"])
+    embed.add_field(name="Log-Kanal", value=log_channel.mention if log_channel else "Nicht gesetzt", inline=False)
+
+    rules_text = ""
+    for rule, cfg in settings["rules"].items():
+        rules_text += f"**{rule}**: {json.dumps(cfg)}\n"
+    embed.add_field(name="Regeln", value=rules_text or "-", inline=False)
+
+    return await ctx.send(embed=embed)
 
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
@@ -1558,6 +1664,93 @@ async def add_feature(ctx, name: str, *, description: str):
 
     # Warnung bei bald ablaufendem Token
     await warn_if_token_expiring(ctx)
+
+# --- Moderation -------
+@bot.event
+async def on_message(message: discord.Message):
+    # Ignoriere Bots & DMs
+    if message.author.bot or not message.guild:
+        return
+
+    settings = await get_mod_settings(message.guild.id)
+    if not settings.get("enabled", True):
+        return
+
+    # Exempt prüfen
+    if (
+        message.author.id in settings["exempt"]["users"]
+        or any(r.id in settings["exempt"]["roles"] for r in message.author.roles)
+        or message.channel.id in settings["exempt"]["channels"]
+    ):
+        return
+
+    rules = settings["rules"]
+    actions_triggered = []
+
+    # 1) Spam-Check: Anzahl Nachrichten in Zeitfenster
+    spam_cfg = rules.get("spam", {})
+    if spam_cfg:
+        now = discord.utils.utcnow()
+        history = [
+            m async for m in message.channel.history(limit=spam_cfg["max_msgs"], after=now - datetime.timedelta(seconds=spam_cfg["window_sec"]))
+            if m.author == message.author
+        ]
+        if len(history) >= spam_cfg["max_msgs"]:
+            actions_triggered.append(("spam", spam_cfg["escalation"]))
+
+    # 2) Mention-Spam
+    mentions_cfg = rules.get("mentions", {})
+    if mentions_cfg and len(message.mentions) > mentions_cfg["max_per_msg"]:
+        actions_triggered.append(("mentions", mentions_cfg["escalation"]))
+
+    # 3) Badwords
+    badwords_cfg = rules.get("badwords", {})
+    if badwords_cfg and badwords_cfg["list"]:
+        content_lower = message.content.lower()
+        for w in badwords_cfg["list"]:
+            if w.lower() in content_lower:
+                actions_triggered.append(("badwords", badwords_cfg["escalation"]))
+                break
+
+    # Maßnahmen umsetzen
+    for rule, escalation in actions_triggered:
+        for step in escalation:
+            if step == "delete":
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+            elif step == "warn":
+                await message.channel.send(f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!")
+            elif step.startswith("timeout:"):
+                secs = int(step.split(":")[1])
+                try:
+                    await message.author.timeout(datetime.timedelta(seconds=secs), reason=f"Automod: {rule}")
+                except discord.HTTPException:
+                    pass
+            elif step == "kick":
+                try:
+                    await message.guild.kick(message.author, reason=f"Automod: {rule}")
+                except discord.HTTPException:
+                    pass
+            elif step == "ban":
+                try:
+                    await message.guild.ban(message.author, reason=f"Automod: {rule}")
+                except discord.HTTPException:
+                    pass
+
+        # In Logs eintragen
+        await db_pool.execute(
+            """
+            INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            message.guild.id, message.channel.id, message.author.id,
+            rule, ",".join(escalation), json.dumps({"content": message.content}),
+        )
+
+    # Damit Commands noch reagieren
+    await bot.process_commands(message)
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
