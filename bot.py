@@ -290,7 +290,6 @@ async def modshow(ctx):
     return await ctx.send(embed=embed)
 
 # ---- Badword Management ---------------------------------------------------
-
 def _normalize_word(w: str) -> str:
     return (w or "").strip().lower()
 
@@ -1804,14 +1803,22 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
+    # 🔒 Owner/Admins sind immer ausgenommen
+    member = message.author
+    try:
+        if member.id == message.guild.owner_id or member.guild_permissions.administrator:
+            return
+    except Exception:
+        pass
+
     settings = await get_mod_settings(message.guild.id)
     if not settings.get("enabled", True):
         return
 
-    # Exempt prüfen
+    # Exempt prüfen (benutzerdefinierte Ausnahmen)
     if (
-        message.author.id in settings["exempt"]["users"]
-        or any(r.id in settings["exempt"]["roles"] for r in message.author.roles)
+        member.id in settings["exempt"]["users"]
+        or any(r.id in settings["exempt"]["roles"] for r in member.roles)
         or message.channel.id in settings["exempt"]["channels"]
     ):
         return
