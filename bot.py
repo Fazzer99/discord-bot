@@ -289,6 +289,112 @@ async def modshow(ctx):
 
     return await ctx.send(embed=embed)
 
+# ---- Badword Management ---------------------------------------------------
+
+def _normalize_word(w: str) -> str:
+    return (w or "").strip().lower()
+
+async def _get_badwords(guild_id: int) -> list[str]:
+    s = await get_mod_settings(guild_id)
+    lst = s.get("rules", {}).get("badwords", {}).get("list", []) or []
+    # Nur Strings, normalisiert und ohne Duplikate
+    out = []
+    seen = set()
+    for x in lst:
+        x = _normalize_word(str(x))
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+async def _set_badwords(guild_id: int, words: list[str]) -> None:
+    s = await get_mod_settings(guild_id)
+    s.setdefault("rules", {}).setdefault("badwords", {})
+    # Maximal 1 000 Wörter als Schutz
+    clean = []
+    seen = set()
+    for w in words[:1000]:
+        w = _normalize_word(w)
+        if w and w not in seen:
+            seen.add(w)
+            clean.append(w)
+    s["rules"]["badwords"]["list"] = clean
+    await save_mod_settings(guild_id, s)
+
+
+@bot.command(name="modbadword")
+@commands.has_permissions(manage_guild=True)
+async def modbadword(ctx, action: str = None, *, payload: str = None):
+    """
+    Verwalte Badwords.
+    Nutzung:
+      !modbadword list
+      !modbadword add <wort>
+      !modbadword remove <wort>
+      !modbadword import <wort1, wort2, ...>
+      !modbadword clear
+    """
+    if not action:
+        return await reply(ctx, "❌ Nutzung: `!modbadword <list|add|remove|import|clear> [Werte]`")
+
+    action = action.lower().strip()
+
+    # LIST
+    if action == "list":
+        words = await _get_badwords(ctx.guild.id)
+        if not words:
+            return await reply(ctx, "ℹ️ Es sind derzeit **keine** Badwords eingetragen.")
+        # kompakt anzeigen (max 50 pro Nachricht)
+        show = ", ".join(words[:50])
+        more = f"\n… +{len(words)-50} weitere" if len(words) > 50 else ""
+        return await reply(ctx, f"📄 Badwords ({len(words)}): {show}{more}")
+
+    # ADD
+    if action == "add":
+        w = _normalize_word(payload or "")
+        if not w:
+            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword add <wort>`")
+        words = await _get_badwords(ctx.guild.id)
+        if w in words:
+            return await reply(ctx, f"ℹ️ `{w}` ist bereits in der Liste.")
+        words.append(w)
+        await _set_badwords(ctx.guild.id, words)
+        return await reply(ctx, f"✅ `{w}` wurde hinzugefügt. (jetzt {len(words)})")
+
+    # REMOVE
+    if action == "remove":
+        w = _normalize_word(payload or "")
+        if not w:
+            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword remove <wort>`")
+        words = await _get_badwords(ctx.guild.id)
+        if w not in words:
+            return await reply(ctx, f"ℹ️ `{w}` ist nicht in der Liste.")
+        words = [x for x in words if x != w]
+        await _set_badwords(ctx.guild.id, words)
+        return await reply(ctx, f"🗑️ `{w}` wurde entfernt. (jetzt {len(words)})")
+
+    # IMPORT (kommagetrennt)
+    if action == "import":
+        if not payload:
+            return await reply(ctx, "❌ Bitte Wörter angeben: `!modbadword import wort1, wort2, ...`")
+        parts = [p.strip() for p in payload.split(",")]
+        words = await _get_badwords(ctx.guild.id)
+        before = len(words)
+        for p in parts:
+            p = _normalize_word(p)
+            if p and p not in words:
+                words.append(p)
+        await _set_badwords(ctx.guild.id, words)
+        diff = len(words) - before
+        return await reply(ctx, f"✅ Import abgeschlossen. **{diff}** neue Wörter hinzugefügt. (jetzt {len(words)})")
+
+    # CLEAR
+    if action == "clear":
+        await _set_badwords(ctx.guild.id, [])
+        return await reply(ctx, "🧼 Liste geleert.")
+
+    return await reply(ctx, "❌ Unbekannte Aktion. Nutze: `list`, `add`, `remove`, `import`, `clear`")
+
 @bot.check
 async def ensure_lang_set(ctx):
     if ctx.guild is None:
