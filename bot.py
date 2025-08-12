@@ -1978,6 +1978,12 @@ async def on_message(message: discord.Message):
     # Ignoriere Bots & DMs
     if message.author.bot or not message.guild:
         return
+    
+    # ✅ Wenn es ein gültiger Bot-Command ist, Command-Parser vor Automod ausführen
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        await bot.process_commands(message)
+        return
 
     # 🔒 Owner/Admins sind immer ausgenommen
     member = message.author
