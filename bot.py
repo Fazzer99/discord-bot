@@ -1691,7 +1691,7 @@ async def on_message(message: discord.Message):
     if spam_cfg:
         now = discord.utils.utcnow()
         history = [
-            m async for m in message.channel.history(limit=spam_cfg["max_msgs"], after=now - datetime.timedelta(seconds=spam_cfg["window_sec"]))
+            m async for m in message.channel.history(limit=spam_cfg["max_msgs"], after=now - timedelta(seconds=spam_cfg["window_sec"]))
             if m.author == message.author
         ]
         if len(history) >= spam_cfg["max_msgs"]:
@@ -1724,7 +1724,7 @@ async def on_message(message: discord.Message):
             elif step.startswith("timeout:"):
                 secs = int(step.split(":")[1])
                 try:
-                    await message.author.timeout(datetime.timedelta(seconds=secs), reason=f"Automod: {rule}")
+                    await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
                 except discord.HTTPException:
                     pass
             elif step == "kick":
