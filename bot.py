@@ -355,6 +355,46 @@ def strictness_mult(s: int):
     t_s = 1.5 - sig      # ~0.5..1.5 (Schwellen invers)
     return w_s, t_s
 
+def ist_exempt_member(guild: discord.Guild, member: discord.Member) -> bool:
+    """True, wenn der Nutzer generell von Automod ausgenommen ist."""
+    if member is None or guild is None:
+        return False
+    # Server-Eigentümer
+    if member.id == guild.owner_id:
+        return True
+    # Administratoren ausnehmen
+    if member.guild_permissions.administrator:
+        return True
+    return False
+
+def bot_darf_moderieren(guild: discord.Guild, ziel: discord.Member, aktion: str) -> bool:
+    """
+    Prüft Rollen-Hierarchie und Berechtigungen des Bots für die gewünschte Aktion.
+    """
+    if guild is None or ziel is None:
+        return False
+    # Niemals gegen Eigentümer
+    if ziel.id == guild.owner_id:
+        return False
+
+    botm = guild.me
+    if botm is None:
+        return False
+
+    # Rollen-Hierarchie: Bot-Rolle muss über der höchsten Rolle des Ziels liegen
+    if botm.top_role <= ziel.top_role:
+        return False
+
+    gp = botm.guild_permissions
+    if aktion == "timeout":
+        return gp.moderate_members
+    if aktion == "kick":
+        return gp.kick_members
+    if aktion == "ban":
+        return gp.ban_members
+    # "warn" braucht keine spezielle Berechtigung
+    return True
+
 async def ermittle_aktion(cfg: dict, heat_wert: float) -> tuple[str, str] | None:
     """Gibt ('warn'|'timeout'|'kick'|'ban', reason) zurück oder None."""
     _, t_s = strictness_mult(int(cfg["strictness"]))
@@ -380,6 +420,24 @@ async def fuehre_aktion_aus(guild_id:int, user_id:int, aktion:tuple[str,str], *,
     guild = bot.get_guild(guild_id)
     member = guild.get_member(user_id) if guild else None
     akt, grund = aktion
+    # Wenn Ziel ausgenommen ist, abbrechen
+    if guild and member and ist_exempt_member(guild, member):
+        return
+
+    # Wenn Bot die Aktion nicht darf, deutliche Meldung im Chat ausgeben
+    if guild and member and not bot_darf_moderieren(guild, member, akt):
+        if msg is not None:
+            try:
+                hinweis = await translate_text_for_guild(
+                    guild_id,
+                    "❌ Konnte die Maßnahme nicht durchführen: fehlende Berechtigung oder Rollen-Hierarchie. "
+                    "Bitte prüfe Bot-Rechte und die Position der Bot-Rolle."
+                )
+                await msg.reply(hinweis)
+            except Exception:
+                pass
+        return
+
 
     # Chat-Hinweis (deutlich kenntlich bei Simulation)
     if msg is not None:
@@ -426,6 +484,10 @@ async def verarbeite_regel_treffer(msg: discord.Message, regel_name: str, grundp
     cfg = await am_get_guild_cfg(msg.guild.id)
     if not cfg:
         return  # Automod nicht initialisiert
+    # Eigentümer/Administratoren ausnehmen
+    if ist_exempt_member(msg.guild, msg.author):
+        return
+
 
     # Heat anwenden
     hit = RuleHit(regel_name=regel_name, grundpunkte=grundpunkte, kontext=kontext)
@@ -1913,6 +1975,10 @@ async def on_message(message: discord.Message):
     # Nur in Guilds, keine Bots
     if message.guild is None or message.author.bot:
         return
+    # Eigentümer/Admins sofort ausnehmen
+    if ist_exempt_member(message.guild, message.author):
+        return
+
 
     inhalt = (message.content or "").lower()
     if any(s in inhalt for s in INVITE_SNIPPETS):
