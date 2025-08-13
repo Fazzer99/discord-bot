@@ -326,6 +326,82 @@ async def invite_ist_erlaubt_in_context(message: discord.Message) -> bool:
             return True
     return False
 
+# ==== DB-Funktionen für automod_rules ====
+
+async def am_get_rules(guild_id: int):
+    """
+    Holt alle Automod-Regeln für diese Guild.
+    """
+    rows = await db_fetch_all("""
+        SELECT guild_id, rule_key, enabled, base_score, weight, config
+        FROM automod_rules
+        WHERE guild_id = $1
+        ORDER BY rule_key
+    """, guild_id)
+    return rows
+
+
+async def am_get_rule(guild_id: int, rule_key: str):
+    """
+    Holt eine einzelne Regel anhand ihres Keys.
+    """
+    row = await db_fetch_row("""
+        SELECT guild_id, rule_key, enabled, base_score, weight, config
+        FROM automod_rules
+        WHERE guild_id = $1 AND rule_key = $2
+    """, guild_id, rule_key)
+    return row
+
+
+async def am_upsert_rule(guild_id: int, rule_key: str, enabled: bool, base_score: float, weight: float, config: dict = None):
+    """
+    Fügt eine Regel hinzu oder aktualisiert sie, falls sie existiert.
+    """
+    await db_execute("""
+        INSERT INTO automod_rules (guild_id, rule_key, enabled, base_score, weight, config)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (guild_id, rule_key)
+        DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            base_score = EXCLUDED.base_score,
+            weight = EXCLUDED.weight,
+            config = EXCLUDED.config
+    """, guild_id, rule_key, enabled, base_score, weight, json.dumps(config) if config else None)
+
+
+async def am_delete_rule(guild_id: int, rule_key: str):
+    """
+    Löscht eine Regel anhand ihres Keys.
+    """
+    await db_execute("""
+        DELETE FROM automod_rules
+        WHERE guild_id = $1 AND rule_key = $2
+    """, guild_id, rule_key)
+
+async def am_get_heat_for_rule(guild_id: int, rule_key: str) -> float:
+    """
+    Holt den Heat-Wert für eine Regel aus der DB, wenn aktiv.
+    Gibt 0 zurück, falls Regel nicht existiert oder deaktiviert ist.
+    """
+    row = await am_rule_get(guild_id, rule_key)
+    if not row or not row["enabled"]:
+        return 0.0
+    return float(row["base_score"]) * float(row["weight"])
+
+# --- Automod (Schritt 7) · Heat aus Rules holen ----------------------------
+
+async def am_get_heat_for_rule(guild_id: int, rule_key: str) -> float:
+    """
+    Gibt base_score * weight zurück, falls die Regel aktiv ist; sonst 0.
+    """
+    row = await am_rule_get(guild_id, rule_key)
+    if not row or not row.get("enabled"):
+        return 0.0
+    try:
+        return float(row["base_score"]) * float(row["weight"])
+    except (TypeError, ValueError):
+        return 0.0
+
 # --- Automod (Schritt 3) · Heat-Basis --------------------------------------
 
 @dataclass
@@ -880,6 +956,70 @@ async def automod_debug_perms(ctx, mitglied: discord.Member):
         f"{mitglied.guild_permissions.administrator or (mitglied.id == g.owner_id)}"
     )
     await ctx.send(await translate_text_for_guild(ctx.guild.id, text))
+
+@bot.command(name="automod_rules")
+@commands.has_permissions(manage_guild=True)
+async def automod_rules(ctx, aktion: str = None, rule_key: str = None, *args):
+    """
+    Verwalte Automod-Regeln.
+    Nutzung:
+      • !automod_rules list
+      • !automod_rules add <regelname> <heat> [gewicht]
+      • !automod_rules update <regelname> <heat> [gewicht]
+      • !automod_rules remove <regelname>
+    """
+    g = ctx.guild
+    aktion = (aktion or "").lower()
+
+    # 1. LIST
+    if aktion == "list":
+        rows = await am_rules_list(g.id)
+        if not rows:
+            return await reply(ctx, "ℹ️ Es sind noch keine Automod-Regeln vorhanden.")
+        zeilen = []
+        for r in rows:
+            zeilen.append(
+                f"• `{r['rule_key']}` | Aktiv: {r['enabled']} | Heat: {r['base_score']} | Gewicht: {r['weight']}"
+            )
+        text = "📜 **Automod-Regeln:**\n" + "\n".join(zeilen)
+        return await ctx.send(await translate_text_for_guild(g.id, text))
+
+    # 2. ADD
+    if aktion == "add":
+        if not rule_key or len(args) < 1:
+            return await reply(ctx, "❌ Nutzung: `!automod_rules add <regelname> <heat> [gewicht]`")
+        try:
+            heat = float(args[0])
+            weight = float(args[1]) if len(args) > 1 else 1.0
+        except ValueError:
+            return await reply(ctx, "❌ Heat und Gewicht müssen Zahlen sein.")
+        await am_rule_upsert(g.id, rule_key, True, heat, weight)
+        return await reply(ctx, f"✅ Regel `{rule_key}` hinzugefügt (Heat={heat}, Gewicht={weight}, Aktiv=True).")
+
+    # 3. UPDATE
+    if aktion == "update":
+        if not rule_key or len(args) < 1:
+            return await reply(ctx, "❌ Nutzung: `!automod_rules update <regelname> <heat> [gewicht]`")
+        try:
+            heat = float(args[0])
+            weight = float(args[1]) if len(args) > 1 else 1.0
+        except ValueError:
+            return await reply(ctx, "❌ Heat und Gewicht müssen Zahlen sein.")
+        row = await am_rule_get(g.id, rule_key)
+        if not row:
+            return await reply(ctx, f"❌ Regel `{rule_key}` existiert nicht.")
+        await am_rule_upsert(g.id, rule_key, row["enabled"], heat, weight, row["config"])
+        return await reply(ctx, f"✅ Regel `{rule_key}` aktualisiert (Heat={heat}, Gewicht={weight}).")
+
+    # 4. REMOVE
+    if aktion == "remove":
+        if not rule_key:
+            return await reply(ctx, "❌ Nutzung: `!automod_rules remove <regelname>`")
+        await am_rule_delete(g.id, rule_key)
+        return await reply(ctx, f"✅ Regel `{rule_key}` wurde gelöscht.")
+
+    # Falsche Nutzung
+    return await reply(ctx, "❌ Nutzung: `!automod_rules list | add | update | remove`")
 
 # ----------------------------------------    
 
@@ -2158,17 +2298,26 @@ async def on_message(message: discord.Message):
     if ist_exempt_member(message.guild, message.author):
         return
 
-
     inhalt = (message.content or "").lower()
+
     if any(s in inhalt for s in INVITE_SNIPPETS):
-        # Invite nur prüfen, wenn nicht whitelist-freigegeben
-        erlaubt = await invite_ist_erlaubt_in_context(message)
-        if erlaubt:
-            return  # in diesem Kontext sind Invite-Links erlaubt
+        # Owner/Admins überspringen (zusätzlicher Früh-Exit ist ok)
+        if ist_exempt_member(message.guild, message.author):
+            return
+
+        # In Whitelist-Kontexten erlauben
+        if await invite_ist_erlaubt_in_context(message):
+            return
+
+        # Heat aus DB laden (automod_rules)
+        heat = await am_get_heat_for_rule(message.guild.id, "invite_link")
+        if heat <= 0:
+            return  # Regel existiert nicht oder ist deaktiviert
+
         await verarbeite_regel_treffer(
             message,
             regel_name="invite_link",
-            grundpunkte=18.0,
+            grundpunkte=heat,
             kontext={"gefunden": "invite_link"}
         )
 
