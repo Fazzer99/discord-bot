@@ -740,6 +740,32 @@ async def automod_timeout(ctx, minuten: int):
     await am_update_guild_cfg(ctx.guild.id, timeout_minutes=minuten)
     await reply(ctx, f"✅ Timeout-Dauer auf **{minuten} Minuten** gesetzt.")
 
+@bot.command(name="automod_debug_perms")
+@commands.has_permissions(manage_guild=True)
+async def automod_debug_perms(ctx, mitglied: discord.Member):
+    """
+    Prüft, ob der Bot dieses Mitglied timeouten/kicken/bannen kann
+    und zeigt Rollen-Hierarchie + Berechtigungen an.
+    Nutzung: !automod_debug_perms @User
+    """
+    g = ctx.guild
+    botm = g.me
+    if not botm:
+        return await reply(ctx, "❌ Konnte den Bot als Mitglied nicht ermitteln.")
+
+    text = (
+        "🔎 **Berechtigungs-Check**\n"
+        f"• Bot höchste Rolle: {botm.top_role}\n"
+        f"• Ziel höchste Rolle: {mitglied.top_role}\n"
+        f"• moderate_members: {botm.guild_permissions.moderate_members}\n"
+        f"• kick_members: {botm.guild_permissions.kick_members}\n"
+        f"• ban_members: {botm.guild_permissions.ban_members}\n"
+        f"• Bot über Ziel-Rolle? {botm.top_role > mitglied.top_role}\n"
+        f"• Ziel ist Admin/Eigentümer? "
+        f"{mitglied.guild_permissions.administrator or (mitglied.id == g.owner_id)}"
+    )
+    await ctx.send(await translate_text_for_guild(ctx.guild.id, text))
+
 # ----------------------------------------    
 
 @bot.command(name="setup")
