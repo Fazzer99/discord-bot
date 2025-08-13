@@ -346,6 +346,106 @@ async def heat_aktualisieren(guild_id: int, user_id: int, hit: RuleHit):
 
     return neu_heat
 
+# --- Automod (Schritt 4) · Schwellen & Aktionen ----------------------------
+
+def strictness_mult(s: int):
+    """Liefert (w_s, t_s) für Punkte- und Schwellenmultiplikator."""
+    sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
+    w_s = 0.5 + sig      # ~0.5..1.5 (Punkte)
+    t_s = 1.5 - sig      # ~0.5..1.5 (Schwellen invers)
+    return w_s, t_s
+
+async def ermittle_aktion(cfg: dict, heat_wert: float) -> tuple[str, str] | None:
+    """Gibt ('warn'|'timeout'|'kick'|'ban', reason) zurück oder None."""
+    _, t_s = strictness_mult(int(cfg["strictness"]))
+    T = {
+        "warn":    float(cfg["t_warn"])    * t_s,
+        "timeout": float(cfg["t_timeout"]) * t_s,
+        "kick":    float(cfg["t_kick"])    * t_s,
+        "ban":     float(cfg["t_ban"])     * t_s,
+    }
+    # Reihenfolge: ban > kick > timeout > warn
+    if heat_wert >= T["ban"] and cfg["action_ban"]:
+        return ("ban", f"Ban-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['ban']:.1f})")
+    if heat_wert >= T["kick"] and cfg["action_kick"]:
+        return ("kick", f"Kick-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['kick']:.1f})")
+    if heat_wert >= T["timeout"] and cfg["action_timeout"]:
+        return ("timeout", f"Timeout-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['timeout']:.1f})")
+    if heat_wert >= T["warn"] and cfg["action_warn"]:
+        return ("warn", f"Warn-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['warn']:.1f})")
+    return None
+
+async def fuehre_aktion_aus(guild_id:int, user_id:int, aktion:tuple[str,str], *, simulate:bool, timeout_min:int, msg:discord.Message|None, regel_name:str):
+    """Führt (oder simuliert) die Aktion aus und antwortet im Channel auf Deutsch."""
+    guild = bot.get_guild(guild_id)
+    member = guild.get_member(user_id) if guild else None
+    akt, grund = aktion
+
+    # Chat-Hinweis (deutlich kenntlich bei Simulation)
+    if msg is not None:
+        prefix = "🧪 (Simulation) " if simulate else "⚠️ "
+        try:
+            text = await translate_text_for_guild(
+                guild_id,
+                f"{prefix}{akt.upper()} wegen **{regel_name}** – {grund}"
+            )
+            await msg.reply(text)
+        except Exception:
+            pass
+
+    if simulate or member is None:
+        return  # im Simulationsmodus keine echte Maßnahme
+
+    try:
+        if akt == "warn":
+            try:
+                await member.send(f"⚠️ Warnung auf **{guild.name}**: {grund}")
+            except Exception:
+                pass
+        elif akt == "timeout":
+            until = datetime.now(timezone.utc) + timedelta(minutes=timeout_min)
+            try:
+                await member.timeout(until=until, reason=f"[Automod] {grund}")
+            except Exception:
+                pass
+        elif akt == "kick":
+            try:
+                await member.kick(reason=f"[Automod] {grund}")
+            except Exception:
+                pass
+        elif akt == "ban":
+            try:
+                await guild.ban(member, reason=f"[Automod] {grund}", delete_message_days=0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+async def verarbeite_regel_treffer(msg: discord.Message, regel_name: str, grundpunkte: float, kontext: dict):
+    """Addiert Heat, prüft Schwellen und führt ggf. Aktion aus (Simulationsmodus beachten)."""
+    cfg = await am_get_guild_cfg(msg.guild.id)
+    if not cfg:
+        return  # Automod nicht initialisiert
+
+    # Heat anwenden
+    hit = RuleHit(regel_name=regel_name, grundpunkte=grundpunkte, kontext=kontext)
+    neuer_heat = await heat_aktualisieren(msg.guild.id, msg.author.id, hit)
+    if neuer_heat is None:
+        return
+
+    # Aktion ermitteln & ggf. ausführen
+    aktion = await ermittle_aktion(cfg, neuer_heat)
+    if aktion:
+        await fuehre_aktion_aus(
+            msg.guild.id, msg.author.id, aktion,
+            simulate=bool(cfg["simulate"]),
+            timeout_min=int(cfg["timeout_minutes"]),
+            msg=msg,
+            regel_name=regel_name
+        )
+
+
+
 # --- Startup --------------------------------------------------------------
 @bot.event
 async def on_ready():
@@ -509,6 +609,38 @@ async def automod_myheat(ctx):
         int(cfg["halflife_minutes"])
     )
     await reply(ctx, f"🔥 Dein aktueller Heat-Wert: **{aktueller_heat:.1f}** Punkte.")
+
+@bot.command(name="automod_action")
+@commands.has_permissions(manage_guild=True)
+async def automod_action(ctx, aktion: str, modus: str):
+    """
+    Schaltet einzelne Maßnahmen an/aus. Nutzung: !automod_action warn|timeout|kick|ban on|off
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration vorhanden. Bitte zuerst `!automod_init` ausführen.")
+    aktion = aktion.lower()
+    modus = modus.lower()
+    if aktion not in ("warn","timeout","kick","ban") or modus not in ("on","off"):
+        return await reply(ctx, "Verwendung: `!automod_action <warn|timeout|kick|ban> <on|off>`")
+    feld = f"action_{aktion}"
+    await am_update_guild_cfg(ctx.guild.id, **{feld: (modus == "on")})
+    await reply(ctx, f"✅ Maßnahme **{aktion}** ist jetzt **{'AN' if modus=='on' else 'AUS'}**.")
+
+@bot.command(name="automod_timeout")
+@commands.has_permissions(manage_guild=True)
+async def automod_timeout(ctx, minuten: int):
+    """
+    Setzt die Timeout-Dauer in Minuten.
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration vorhanden. Bitte zuerst `!automod_init` ausführen.")
+    minuten = max(1, int(minuten))
+    await am_update_guild_cfg(ctx.guild.id, timeout_minutes=minuten)
+    await reply(ctx, f"✅ Timeout-Dauer auf **{minuten} Minuten** gesetzt.")
+
+# ----------------------------------------    
 
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
@@ -1768,6 +1900,28 @@ async def add_feature(ctx, name: str, *, description: str):
 
     # Warnung bei bald ablaufendem Token
     await warn_if_token_expiring(ctx)
+
+# --- Automod (Schritt 4) · Regel 1: Invite-Links --------------------------
+
+INVITE_SNIPPETS = ("discord.gg/", "discord.com/invite/", "discordapp.com/invite/")
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Commands weiterhin funktionieren lassen
+    await bot.process_commands(message)
+
+    # Nur in Guilds, keine Bots
+    if message.guild is None or message.author.bot:
+        return
+
+    inhalt = (message.content or "").lower()
+    if any(s in inhalt for s in INVITE_SNIPPETS):
+        await verarbeite_regel_treffer(
+            message,
+            regel_name="invite_link",
+            grundpunkte=18.0,  # Startwert; feintunen wir später
+            kontext={"gefunden": "invite_link"}
+        )
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
