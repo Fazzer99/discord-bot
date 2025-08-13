@@ -415,22 +415,36 @@ async def ermittle_aktion(cfg: dict, heat_wert: float) -> tuple[str, str] | None
         return ("warn", f"Warn-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['warn']:.1f})")
     return None
 
-# --- Kompatibler Timeout-Setter (discord.py / py-cord / Varianten) --------
+# --- Kompatibler Timeout-Setter (versch. Library-Versionen) ----------------
 async def set_member_timeout(member: discord.Member, until_dt: datetime, reason: str) -> None:
     """
     Versucht mehrere Methoden, um einen Timeout zu setzen.
-    Wirft eine Exception weiter, wenn alle Pfade scheitern.
+    Deckt unterschiedliche Signaturen von discord.py/py-cord ab.
     """
-    # 1) Neuere Libraries: Member.timeout(until=..., reason=...)
+    # Variante A: positional arg (häufige Signatur: timeout(until, reason=None))
+    try:
+        await member.timeout(until_dt, reason=reason)
+        return
+    except TypeError:
+        # falsche Signatur → nächste Variante probieren
+        pass
+    except AttributeError:
+        # Methode existiert nicht → nächste Variante probieren
+        pass
+    except Exception:
+        raise  # andere Fehler weitergeben
+
+    # Variante B: keyword (manche Forks akzeptieren 'until=')
     try:
         await member.timeout(until=until_dt, reason=reason)
         return
     except AttributeError:
-        pass  # Methode existiert nicht
+        pass
     except Exception:
-        raise  # andere Fehler weitergeben
+        # wenn kein Attrib-Fehler: weiterreichen
+        raise
 
-    # 2) discord.py 2.x: .edit(communication_disabled_until=...)
+    # Variante C: Member.edit mit communication_disabled_until (discord.py 2.x)
     try:
         await member.edit(communication_disabled_until=until_dt, reason=reason)
         return
@@ -439,7 +453,7 @@ async def set_member_timeout(member: discord.Member, until_dt: datetime, reason:
     except Exception:
         raise
 
-    # 3) Ältere Schreibweise: .edit(timed_out_until=...)
+    # Variante D: ältere Schreibweise timed_out_until
     try:
         await member.edit(timed_out_until=until_dt, reason=reason)
         return
