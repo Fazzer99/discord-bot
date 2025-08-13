@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import asyncio
 from datetime import datetime, timezone, timedelta
-from collections import defaultdict
 from typing import Optional
 try:
     from zoneinfo import ZoneInfo
@@ -18,6 +17,9 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord.ext.commands import Greedy
+
+import math
+from dataclasses import dataclass
 
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
 DEEPL_KEY = os.getenv("DEEPL_API_KEY")
@@ -119,181 +121,6 @@ async def reply(ctx, text_de: str, **fmt):
         rendered = rendered_de
     return await ctx.send(rendered)
 
-# -------------------- Moderation: Presets & Helpers --------------------
-
-# Preset-Definitionen (du kannst die Werte später jederzeit anpassen)
-MOD_PRESETS = {
-    "lenient": {
-        "spam":     {"max_msgs": 10, "window_sec": 7, "escalation": ["delete", "warn"]},
-        "mentions": {"max_per_msg": 8,  "escalation": ["delete", "warn"]},
-        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "warn"]},
-        "invites":  {"block": True, "escalation": ["delete", "warn"]},
-        "caps":     {"min_len": 12, "ratio": 0.8, "escalation": ["warn"]},
-        "emoji":    {"max": 10, "escalation": ["warn"]},
-    },
-    "balanced": {
-        "spam":     {"max_msgs": 6, "window_sec": 5, "escalation": ["delete", "warn", "timeout:600", "timeout:3600"]},
-        "mentions": {"max_per_msg": 5, "escalation": ["delete", "warn", "timeout:600"]},
-        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "warn", "timeout:600"]},
-        "invites":  {"block": True, "escalation": ["delete", "warn"]},
-        "caps":     {"min_len": 12, "ratio": 0.7, "escalation": ["warn"]},
-        "emoji":    {"max": 8, "escalation": ["warn"]},
-    },
-    "strict": {
-        "spam":     {"max_msgs": 4, "window_sec": 4, "escalation": ["delete", "warn", "timeout:900", "timeout:3600"]},
-        "mentions": {"max_per_msg": 3, "escalation": ["delete", "warn", "timeout:900"]},
-        "badwords": {"list": [], "mode": "substring", "escalation": ["delete", "timeout:900"]},
-        "invites":  {"block": True, "escalation": ["delete", "warn", "timeout:600"]},
-        "caps":     {"min_len": 12, "ratio": 0.6, "escalation": ["warn", "timeout:300"]},
-        "emoji":    {"max": 5, "escalation": ["warn"]},
-    },
-}
-
-def _build_mod_settings(preset: str = "balanced", log_channel: int = 0) -> dict:
-    # "custom" startet identisch wie balanced, ist aber als preset "custom" markiert
-    from copy import deepcopy
-    base = deepcopy(MOD_PRESETS.get(preset if preset != "custom" else "balanced", MOD_PRESETS["balanced"]))
-    return {
-        "enabled": True,
-        "preset": preset,
-        "log_channel": int(log_channel or 0),
-        "rules": base,
-        "exempt": {"roles": [], "channels": [], "users": []},
-    }
-
-async def get_mod_settings(guild_id: int) -> dict:
-    """Hole aktuelle Moderations-Einstellungen für die Guild. Fällt auf balanced zurück."""
-    cfg = await get_guild_cfg(guild_id)
-    raw = (cfg or {}).get("mod_settings") or {}
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except Exception:
-            raw = {}
-    if not raw:
-        return _build_mod_settings("balanced", 0)
-    # Minimal-Defaults ergänzen, falls ältere Struktur
-    raw.setdefault("enabled", True)
-    raw.setdefault("preset", "balanced")
-    raw.setdefault("log_channel", 0)
-    raw.setdefault("rules", MOD_PRESETS["balanced"])
-    raw.setdefault("exempt", {"roles": [], "channels": [], "users": []})
-    return raw
-
-async def save_mod_settings(guild_id: int, settings: dict) -> None:
-    """Speichere Moderations-Einstellungen in guild_settings.mod_settings."""
-    await update_guild_cfg(guild_id, mod_settings=settings)
-
-# Cooldown-Fenster: wenn in dieser Zeit kein neuer Verstoß kommt, wird die Eskalation zurückgesetzt
-AUTOMOD_COOLDOWN_SEC = 30 * 60  # 30 Minuten
-
-# Exponentielle Leiter (in Sekunden) – 1m, 5m, 15m, 60m (Cap)
-ESCALATION_TIMEOUTS = [60, 300, 900, 3600]
-
-# In-Memory Strike-Zähler: Schlüssel = (guild_id, user_id, rule) -> {"count": int, "last": datetime}
-AUTOMOD_STRIKES: dict[tuple[int, int, str], dict] = {}
-
-def _next_timeout_secs(guild_id: int, user_id: int, rule: str, now: datetime) -> int:
-    """
-    Gibt die nächste Timeout-Dauer zurück und aktualisiert den Strike-Zähler.
-    Reset, wenn seit letztem Verstoß > AUTOCooldown vergangen ist.
-    """
-    key = (guild_id, user_id, rule)
-    data = AUTOMOD_STRIKES.get(key)
-
-    if not data or (now - data["last"]).total_seconds() > AUTOMOD_COOLDOWN_SEC:
-        count = 0
-    else:
-        count = min((data.get("count", 0) + 1), len(ESCALATION_TIMEOUTS) - 1)
-
-    secs = ESCALATION_TIMEOUTS[count]
-    AUTOMOD_STRIKES[key] = {"count": count, "last": now}
-    return secs
-
-# Verhindert Mehrfach-Aktionen in kurzer Zeit (z. B. 2 Timeouts in 1-2s)
-ENFORCEMENT_DEBOUNCE_SEC = 4  # pro (guild, user, rule)
-
-# (guild_id, user_id, rule) -> datetime (letzte Durchsetzung)
-LAST_ENFORCEMENT: dict[tuple[int, int, str], datetime] = {}
-
-def _can_enforce_now(guild_id: int, user_id: int, rule: str, now: datetime) -> bool:
-    key = (guild_id, user_id, rule)
-    last = LAST_ENFORCEMENT.get(key)
-    if not last:
-        return True
-    return (now - last).total_seconds() >= ENFORCEMENT_DEBOUNCE_SEC
-
-def _mark_enforced(guild_id: int, user_id: int, rule: str, when: datetime) -> None:
-    LAST_ENFORCEMENT[(guild_id, user_id, rule)] = when
-
-# Serielle Durchsetzung pro (guild, user, rule)
-ENFORCEMENT_LOCKS: dict[tuple[int, int, str], asyncio.Lock] = {}
-
-def _get_enforcement_lock(guild_id: int, user_id: int, rule: str) -> asyncio.Lock:
-    key = (guild_id, user_id, rule)
-    lock = ENFORCEMENT_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        ENFORCEMENT_LOCKS[key] = lock
-    return lock
-
-# --------- Modlog Helpers (Embed + Sender) ---------
-async def _send_modlog_embed(guild: discord.Guild, embed: discord.Embed) -> None:
-    """Sendet ein Moderations-Embed in den in mod_settings konfigurierten Log-Kanal (falls gesetzt)."""
-    try:
-        settings = await get_mod_settings(guild.id)
-        log_id = int(settings.get("log_channel") or 0)
-        if not log_id:
-            return
-        ch = guild.get_channel(log_id)
-        if not isinstance(ch, discord.TextChannel):
-            return
-        
-        # Lokale Zeit ermitteln und Footer setzen (überschreibt evtl. vorhandenen)
-        tz = await _get_guild_zoneinfo(guild.id)
-        local_now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-        embed.set_footer(text=local_now)
-
-        # DE→EN falls nötig
-        embed = await translate_embed_for_guild(guild.id, embed)
-        await ch.send(embed=embed)
-    except Exception:
-        # leise schlucken – Logs sollen niemals den Flow crashen
-        pass
-
-def _build_modlog_embed(
-    guild: discord.Guild,
-    user: discord.Member,
-    channel: discord.abc.GuildChannel,
-    rule: str,
-    steps: list[str],
-    content_snapshot: str,
-    timeout_secs: int | None = None
-) -> discord.Embed:
-    """Baut ein hübsches Log-Embed für Automod-Aktionen."""
-    title = "🛡️ AutoMod"
-    if timeout_secs:
-        title += f" – Timeout ({timeout_secs//60}m)"
-    elif "warn" in steps:
-        title += " – Warnung"
-    elif "delete" in steps:
-        title += " – Nachricht gelöscht"
-
-    emb = discord.Embed(title=title, color=discord.Color.orange())
-    emb.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
-    emb.add_field(name="Channel", value=f"{channel.mention} (`{channel.id}`)", inline=False)
-    emb.add_field(name="Regel", value=rule, inline=True)
-    emb.add_field(name="Aktionen", value=", ".join(steps), inline=True)
-
-    # Nachricht (gekürzt)
-    snap = (content_snapshot or "").strip()
-    if len(snap) > 300:
-        snap = snap[:297] + "…"
-    emb.add_field(name="Nachricht", value=(snap or "—"), inline=False)
-
-    emb.set_footer(text=datetime.now(timezone.utc).strftime("UTC %Y-%m-%d %H:%M:%S"))
-    return emb
-
 # Deine eigene Discord-User-ID 
 BOT_OWNER_ID = 693861343014551623
 
@@ -319,9 +146,6 @@ def build_feature_list():
 
 # --- Environment & Bot ----------------------------------------------------
 load_dotenv()
-
-DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
-DEEPL_KEY = os.getenv("DEEPL_API_KEY")
 TOKEN  = os.getenv("DISCORD_TOKEN")
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -335,244 +159,6 @@ intents.message_content = True
 intents.members         = True  # für Member-Events benötigt
 bot = commands.Bot(command_prefix="!", intents=intents)
 db_pool: asyncpg.Pool | None = None
-
-@bot.command(name="modsetup")
-@commands.has_permissions(manage_guild=True)
-async def modsetup(ctx, preset: str = None, log_channel: discord.TextChannel = None):
-    """Moderation-Setup: Preset + Log-Kanal setzen"""
-    valid_presets = ["lenient", "balanced", "strict", "custom"]
-    if preset is None or preset.lower() not in valid_presets or log_channel is None:
-        return await reply(
-            ctx,
-            "❌ Nutzung: `!modsetup <lenient|balanced|strict|custom> #logchannel`"
-        )
-
-    preset = preset.lower()
-    settings = _build_mod_settings(preset, log_channel.id)
-    await save_mod_settings(ctx.guild.id, settings)
-    return await reply(
-        ctx,
-        f"✅ Moderation-Setup gespeichert!\nPreset: **{preset}**\nLog-Kanal: {log_channel.mention}"
-    )
-
-@bot.command(name="modshow")
-@commands.has_permissions(manage_guild=True)
-async def modshow(ctx):
-    """Zeigt aktuelle Moderations-Einstellungen"""
-    settings = await get_mod_settings(ctx.guild.id)
-    embed = discord.Embed(
-        title="📋 Moderations-Einstellungen",
-        color=discord.Color.blue()
-    )
-    embed.add_field(name="Aktiviert", value="✅ Ja" if settings["enabled"] else "❌ Nein", inline=False)
-    embed.add_field(name="Preset", value=settings["preset"], inline=False)
-    log_channel = ctx.guild.get_channel(settings["log_channel"])
-    embed.add_field(name="Log-Kanal", value=log_channel.mention if log_channel else "Nicht gesetzt", inline=False)
-
-    rules_text = ""
-    for rule, cfg in settings["rules"].items():
-        rules_text += f"**{rule}**: {json.dumps(cfg)}\n"
-    embed.add_field(name="Regeln", value=rules_text or "-", inline=False)
-
-    return await ctx.send(embed=embed)
-
-# ---- Badword Management ---------------------------------------------------
-def _normalize_word(w: str) -> str:
-    return (w or "").strip().lower()
-
-async def _get_badwords(guild_id: int) -> list[str]:
-    s = await get_mod_settings(guild_id)
-    lst = s.get("rules", {}).get("badwords", {}).get("list", []) or []
-    # Nur Strings, normalisiert und ohne Duplikate
-    out = []
-    seen = set()
-    for x in lst:
-        x = _normalize_word(str(x))
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-async def _set_badwords(guild_id: int, words: list[str]) -> None:
-    s = await get_mod_settings(guild_id)
-    s.setdefault("rules", {}).setdefault("badwords", {})
-    # Maximal 1 000 Wörter als Schutz
-    clean = []
-    seen = set()
-    for w in words[:1000]:
-        w = _normalize_word(w)
-        if w and w not in seen:
-            seen.add(w)
-            clean.append(w)
-    s["rules"]["badwords"]["list"] = clean
-    await save_mod_settings(guild_id, s)
-
-
-@bot.command(name="modbadword")
-@commands.has_permissions(manage_guild=True)
-async def modbadword(ctx, action: str = None, *, payload: str = None):
-    """
-    Verwalte Badwords.
-    Nutzung:
-      !modbadword list
-      !modbadword add <wort>
-      !modbadword remove <wort>
-      !modbadword import <wort1, wort2, ...>
-      !modbadword clear
-    """
-    if not action:
-        return await reply(ctx, "❌ Nutzung: `!modbadword <list|add|remove|import|clear> [Werte]`")
-    
-    action = (action or "").lower().strip()
-
-    # LIST
-    if action == "list":
-        words = await _get_badwords(ctx.guild.id)
-        if not words:
-            return await reply(ctx, "ℹ️ Es sind derzeit **keine** Badwords eingetragen.")
-        show = ", ".join(words[:50])
-        more = f"\n… +{len(words)-50} weitere" if len(words) > 50 else ""
-        return await reply(ctx, f"📄 Badwords ({len(words)}): {show}{more}")
-
-    # ADD
-    if action == "add":
-        w = _normalize_word(payload or "")
-        if not w:
-            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword add <wort>`")
-        words = await _get_badwords(ctx.guild.id)
-        if w in words:
-            return await reply(ctx, f"ℹ️ `{w}` ist bereits in der Liste.")
-        words.append(w)
-        await _set_badwords(ctx.guild.id, words)
-        return await reply(ctx, f"✅ `{w}` wurde hinzugefügt. (jetzt {len(words)})")
-
-    # REMOVE
-    if action == "remove":
-        w = _normalize_word(payload or "")
-        if not w:
-            return await reply(ctx, "❌ Bitte ein Wort angeben: `!modbadword remove <wort>`")
-        words = await _get_badwords(ctx.guild.id)
-        if w not in words:
-            return await reply(ctx, f"ℹ️ `{w}` ist nicht in der Liste.")
-        words = [x for x in words if x != w]
-        await _set_badwords(ctx.guild.id, words)
-        return await reply(ctx, f"🗑️ `{w}` wurde entfernt. (jetzt {len(words)})")
-
-    # IMPORT (kommagetrennt)
-    if action == "import":
-        if not payload:
-            return await reply(ctx, "❌ Bitte Wörter angeben: `!modbadword import wort1, wort2, ...`")
-        parts = [p.strip() for p in payload.split(",")]
-        words = await _get_badwords(ctx.guild.id)
-        before = len(words)
-        for p in parts:
-            p = _normalize_word(p)
-            if p and p not in words:
-                words.append(p)
-        await _set_badwords(ctx.guild.id, words)
-        diff = len(words) - before
-        return await reply(ctx, f"✅ Import abgeschlossen. **{diff}** neue Wörter hinzugefügt. (jetzt {len(words)})")
-
-    # CLEAR
-    if action == "clear":
-        await _set_badwords(ctx.guild.id, [])
-        return await reply(ctx, "🧼 Liste geleert.")
-
-    return await reply(ctx, "❌ Unbekannte Aktion. Nutze: `list`, `add`, `remove`, `import`")
-    
-    # ---- Exempt Management (Users/Roles/Channels) ----------------------------
-
-def _norm_kind(kind: str) -> str | None:
-    if not kind:
-        return None
-    k = kind.lower().strip()
-    if k in ("user", "member", "u"):
-        return "users"
-    if k in ("role", "r"):
-        return "roles"
-    if k in ("channel", "chan", "c"):
-        return "channels"
-    return None
-
-async def _get_exempt_lists(guild_id: int) -> dict:
-    s = await get_mod_settings(guild_id)
-    ex = s.get("exempt") or {}
-    ex.setdefault("users", [])
-    ex.setdefault("roles", [])
-    ex.setdefault("channels", [])
-    return ex
-
-async def _set_exempt_lists(guild_id: int, ex: dict) -> None:
-    s = await get_mod_settings(guild_id)
-    s["exempt"] = {
-        "users":    list({int(x) for x in ex.get("users", [])}),
-        "roles":    list({int(x) for x in ex.get("roles", [])}),
-        "channels": list({int(x) for x in ex.get("channels", [])}),
-    }
-    await save_mod_settings(guild_id, s)
-
-def _id_from_mention_or_id(arg: str) -> int | None:
-    if not arg:
-        return None
-    arg = arg.strip()
-    # <@123>, <@!123>, <#123>, <@&123>, raw "123"
-    digits = "".join(ch for ch in arg if ch.isdigit())
-    return int(digits) if digits else None
-
-@bot.command(name="modexempt")
-@commands.has_permissions(manage_guild=True)
-async def modexempt(ctx, action: str = None, kind: str = None, *, value: str = None):
-    """
-    Verwalte Ausnahmen (Whitelist) für die Automod.
-    Nutzung:
-      !modexempt list
-      !modexempt add user|role|channel <@mention|ID>
-      !modexempt remove user|role|channel <@mention|ID>
-    """
-    if not action:
-        return await reply(ctx, "❌ Nutzung: `!modexempt <list|add|remove> [user|role|channel] [@/ID]`")
-
-    action = action.lower().strip()
-
-    # LIST
-    if action == "list":
-        ex = await _get_exempt_lists(ctx.guild.id)
-        u = ", ".join(f"<@{i}>" for i in ex["users"]) or "—"
-        r = ", ".join(f"<@&{i}>" for i in ex["roles"]) or "—"
-        c = ", ".join(f"<#{i}>" for i in ex["channels"]) or "—"
-        return await reply(ctx, f"📄 **Exempt**\nUsers: {u}\nRoles: {r}\nChannels: {c}")
-
-    # ADD / REMOVE
-    k = _norm_kind(kind)
-    if action not in ("add", "remove") or not k:
-        return await reply(ctx, "❌ Nutzung: `!modexempt add|remove user|role|channel <@/ID>`")
-
-    # ID aus Mention/ID ziehen – wenn mention leer ist, versuche aus message zu lesen
-    target_id = _id_from_mention_or_id(value or "")
-    if not target_id:
-        return await reply(ctx, "❌ Bitte eine gültige Erwähnung oder ID angeben.")
-
-    ex = await _get_exempt_lists(ctx.guild.id)
-    items = set(int(x) for x in ex[k])
-
-    if action == "add":
-        items.add(target_id)
-        ex[k] = list(items)
-        await _set_exempt_lists(ctx.guild.id, ex)
-        mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
-        return await reply(ctx, f"✅ Hinzugefügt zu **{k}**: {mention}")
-
-    if action == "remove":
-        if target_id not in items:
-            mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
-            return await reply(ctx, f"ℹ️ Nicht in **{k}** enthalten: {mention}")
-        items.remove(target_id)
-        ex[k] = list(items)
-        await _set_exempt_lists(ctx.guild.id, ex)
-        mention = f"<@{target_id}>" if k == "users" else (f"<@&{target_id}>" if k == "roles" else f"<#{target_id}>")
-        return await reply(ctx, f"🗑️ Entfernt aus **{k}**: {mention}")
-
-    return await reply(ctx, "❌ Unbekannte Aktion. Nutze: `list`, `add`, `remove`, `import`, `clear`")
 
 @bot.check
 async def ensure_lang_set(ctx):
@@ -649,7 +235,6 @@ async def get_guild_cfg(guild_id: int) -> dict:
     )
     return await get_guild_cfg(guild_id)
 
-
 async def update_guild_cfg(guild_id: int, **fields):
     """
     Schreibt einzelne Felder zurück in die DB.
@@ -670,6 +255,32 @@ async def update_guild_cfg(guild_id: int, **fields):
     await db_pool.execute(
         f"UPDATE guild_settings SET {cols} WHERE guild_id = $1",
         *vals
+    )
+
+# --- Automod (Step 1) · DB-Helpers ----------------------------------------
+async def am_get_guild_cfg(guild_id: int) -> Optional[dict]:
+    """Liest automod_guild; None falls noch keine Zeile existiert."""
+    row = await db_pool.fetchrow(
+        "SELECT * FROM automod_guild WHERE guild_id=$1",
+        guild_id
+    )
+    return dict(row) if row else None
+
+async def am_upsert_guild_defaults(guild_id: int):
+    """Legt eine Default-Zeile an, falls nicht vorhanden (keine Schema-Änderung)."""
+    await db_pool.execute("""
+        INSERT INTO automod_guild (guild_id) VALUES ($1)
+        ON CONFLICT (guild_id) DO NOTHING
+    """, guild_id)
+
+async def am_update_guild_cfg(guild_id: int, **fields):
+    """Schreibt Konfig-Felder in automod_guild (z. B. simulate on/off)."""
+    if not fields:
+        return
+    cols = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields))
+    await db_pool.execute(
+        f"UPDATE automod_guild SET {cols}, updated_at=now() WHERE guild_id=$1",
+        guild_id, *fields.values()
     )
 
 # --- Startup --------------------------------------------------------------
@@ -717,6 +328,48 @@ async def on_command_error(ctx, error):
         raise error
 
 # --- Setup Wizard ---------------------------------------------------------
+# --- Automod (Step 1) · Commands ------------------------------------------
+@bot.command(name="automod_init")
+@commands.has_permissions(manage_guild=True)
+async def automod_init(ctx):
+    """
+    Legt die Default-Automod-Zeile für diese Guild an.
+    (Schema muss bereits per psql angelegt sein.)
+    """
+    await am_upsert_guild_defaults(ctx.guild.id)
+    await reply(ctx, "✅ Automod-Grundkonfiguration angelegt (Simulate=ON, Timeout aktiv, Kick/Ban aus).")
+
+@bot.command(name="automod_status")
+@commands.has_permissions(manage_guild=True)
+async def automod_status(ctx):
+    """
+    Zeigt die aktuelle Automod-Konfiguration (2-sprachig).
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration. Bitte `!automod_init` ausführen.")
+
+    # Gewichte anzeigen (nur Info – Logik folgt in Schritt 2)
+    s = int(cfg["strictness"])
+    sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
+    w_s = 0.5 + sig      # ~0.5..1.5
+    t_s = 1.5 - sig      # ~0.5..1.5
+
+    text_de = (
+        "🔧 **Automod Status**\n"
+        f"• Strictness: {s}  (w_s≈{w_s:.2f}, t_s≈{t_s:.2f})\n"
+        f"• Halflife: {cfg['halflife_minutes']} min\n"
+        f"• Simulate: {cfg['simulate']}\n"
+        f"• Aktionen: warn={cfg['action_warn']} | timeout={cfg['action_timeout']} | "
+        f"kick={cfg['action_kick']} | ban={cfg['action_ban']}\n"
+        f"• Schwellen: warn={cfg['t_warn']} | timeout={cfg['t_timeout']} | "
+        f"kick={cfg['t_kick']} | ban={cfg['t_ban']}\n"
+        f"• Timeout-Dauer: {cfg['timeout_minutes']} min"
+    )
+    # 2-sprachig mit deinem DeepL-Flow:
+    out = await translate_text_for_guild(ctx.guild.id, text_de)
+    await ctx.send(out)
+
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
@@ -1975,157 +1628,6 @@ async def add_feature(ctx, name: str, *, description: str):
 
     # Warnung bei bald ablaufendem Token
     await warn_if_token_expiring(ctx)
-
-# --- Moderation -------
-@bot.event
-async def on_message(message: discord.Message):
-    # Ignoriere Bots & DMs
-    if message.author.bot or not message.guild:
-        return
-    
-    # ✅ Wenn es ein gültiger Bot-Command ist, Command-Parser vor Automod ausführen
-    ctx = await bot.get_context(message)
-    if ctx.valid:
-        await bot.process_commands(message)
-        return
-
-    # 🔒 Owner/Admins sind immer ausgenommen
-    member = message.author
-    try:
-        if member.id == message.guild.owner_id or member.guild_permissions.administrator:
-            await bot.process_commands(message)
-            return
-    except Exception:
-        pass
-
-    settings = await get_mod_settings(message.guild.id)
-    if not settings.get("enabled", True):
-        return
-
-    # Exempt prüfen (benutzerdefinierte Ausnahmen)
-    if (
-        member.id in settings["exempt"]["users"]
-        or any(r.id in settings["exempt"]["roles"] for r in member.roles)
-        or message.channel.id in settings["exempt"]["channels"]
-    ):
-        return
-
-    rules = settings["rules"]
-    actions_triggered = []
-
-    # 1) Spam-Check: Anzahl Nachrichten in Zeitfenster
-    spam_cfg = rules.get("spam", {})
-    if spam_cfg:
-        now = discord.utils.utcnow()
-        history = [
-            m async for m in message.channel.history(limit=spam_cfg["max_msgs"], after=now - timedelta(seconds=spam_cfg["window_sec"]))
-            if m.author == message.author
-        ]
-        if len(history) >= spam_cfg["max_msgs"]:
-            actions_triggered.append(("spam", spam_cfg["escalation"]))
-
-    # 2) Mention-Spam
-    mentions_cfg = rules.get("mentions", {})
-    if mentions_cfg and len(message.mentions) > mentions_cfg["max_per_msg"]:
-        actions_triggered.append(("mentions", mentions_cfg["escalation"]))
-
-    # 3) Badwords
-    badwords_cfg = rules.get("badwords", {})
-    if badwords_cfg and badwords_cfg["list"]:
-        content_lower = message.content.lower()
-        for w in badwords_cfg["list"]:
-            if w.lower() in content_lower:
-                actions_triggered.append(("badwords", badwords_cfg["escalation"]))
-                break
-
-    # Maßnahmen umsetzen (exponentielle Timeouts + Logs als Embed)
-    # Dedupe: gleiche Regel nur 1x behandeln
-    triggered_rules = {rule for rule, _ in actions_triggered}
-
-    for rule in triggered_rules:
-        # seriell pro (guild, user, rule)
-        lock = _get_enforcement_lock(message.guild.id, message.author.id, rule)
-        async with lock:
-            now = discord.utils.utcnow()
-
-            # Debounce prüfen – falls gerade eben schon durchgesetzt, überspringen
-            if not _can_enforce_now(message.guild.id, message.author.id, rule, now):
-                continue
-            # direkt markieren, damit parallel eintreffende Events geblockt sind
-            _mark_enforced(message.guild.id, message.author.id, rule, now)
-
-            steps_done: list[str] = []
-            content_snapshot = message.content or ""
-
-            # 1) Nachricht löschen (bei diesen Regeln sinnvoll)
-            if rule in ("spam", "mentions", "badwords", "invites"):
-                try:
-                    await message.delete()
-                    steps_done.append("delete")
-                except discord.HTTPException:
-                    pass
-
-            # 2) Warnung (zweisprachig)
-            warn_de = f"⚠️ {message.author.mention}, bitte halte dich an die Regeln!"
-            warn_txt = await translate_text_for_guild(message.guild.id, warn_de)
-            try:
-                await message.channel.send(warn_txt)
-                steps_done.append("warn")
-            except discord.HTTPException:
-                pass
-
-            # 3) Exponentieller Timeout: 1m → 5m → 15m → 60m (Reset nach Cooldown)
-            secs = _next_timeout_secs(message.guild.id, message.author.id, rule, now)
-            try:
-                await message.author.timeout(timedelta(seconds=secs), reason=f"Automod: {rule}")
-                steps_done.append(f"timeout:{secs}")
-            except discord.HTTPException:
-                pass
-
-            # 4) DB-Log
-            try:
-                await db_pool.execute(
-                    """
-                    INSERT INTO mod_logs (guild_id, channel_id, user_id, rule, action, details)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    """,
-                    message.guild.id,
-                    message.channel.id,
-                    message.author.id,
-                    rule,
-                    ",".join(steps_done),
-                    json.dumps({"content": content_snapshot}),
-                )
-            except Exception:
-                pass
-
-            # 5) Embed ins Log
-            emb = _build_modlog_embed(
-                message.guild,
-                message.author,
-                message.channel,
-                rule,
-                steps_done,
-                content_snapshot,
-                timeout_secs=secs if any(s.startswith("timeout:") for s in steps_done) else None
-            )
-            await _send_modlog_embed(message.guild, emb)
-
-        # mark enforcement for debounce
-        _mark_enforced(message.guild.id, message.author.id, rule, now)
-
-    await bot.process_commands(message)
-
-async def _get_guild_zoneinfo(guild_id: int):
-    try:
-        cfg = await get_guild_cfg(guild_id)
-        tz = (cfg.get("tz") or "Europe/Berlin").strip()
-        try:
-            return ZoneInfo(tz)
-        except Exception:
-            return ZoneInfo("UTC")
-    except Exception:
-        return ZoneInfo("UTC")
 
 # --- Bot Start ------------------------------------------------------------
 bot.run(TOKEN)
