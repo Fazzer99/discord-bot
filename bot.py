@@ -811,20 +811,24 @@ async def automod_invite_whitelist(ctx, aktion: str, typ: str = None, ziel: str 
     g = ctx.guild
     aktion = (aktion or "").lower()
 
-    if aktion == "list":
-        eintraege = await invite_whitelist_liste(g.id)
-        if not eintraege:
-            return await reply(ctx, "ℹ️ Invite-Whitelist ist leer.")
-        zeilen = []
-        for e in eintraege:
-            if e["target_type"] == "channel":
-                ch = g.get_channel(int(e["target_id"]))
-                zeilen.append(f"• Kanal: {ch.mention if ch else e['target_id']}")
-            else:
-                rl = g.get_role(int(e["target_id"]))
-                zeilen.append(f"• Rolle: {rl.mention if rl else e['target_id']}")
-        text = "✅ Invite-Whitelist:\n" + "\n".join(zeilen)
-        return await ctx.send(await translate_text_for_guild(g.id, text))
+    if aktion == "add":
+        if typ == "channel":
+            channel = ctx.message.channel_mentions[0]
+            await invite_whitelist_add(g.id, channel.id, typ)
+            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: {channel.mention}")
+        else:  # role
+            role = ctx.message.role_mentions[0]
+            await invite_whitelist_add(g.id, role.id, typ)
+            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: @{role.name}")
+    else:  # remove
+        if typ == "channel":
+            channel = ctx.message.channel_mentions[0]
+            await invite_whitelist_remove(g.id, channel.id, typ)
+            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: {channel.mention}")
+        else:  # role
+            role = ctx.message.role_mentions[0]
+            await invite_whitelist_remove(g.id, role.id, typ)
+            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: @{role.name}")
 
     if aktion not in ("add", "remove") or typ not in ("channel", "role") or ziel is None:
         return await reply(ctx, "Verwendung: `!automod_invite_whitelist list | add/remove <channel|role> <#kanal|@rolle>`")
