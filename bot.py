@@ -415,6 +415,37 @@ async def ermittle_aktion(cfg: dict, heat_wert: float) -> tuple[str, str] | None
         return ("warn", f"Warn-Schwelle überschritten (Heat {heat_wert:.1f} ≥ {T['warn']:.1f})")
     return None
 
+# --- Kompatibler Timeout-Setter (discord.py / py-cord / Varianten) --------
+async def set_member_timeout(member: discord.Member, until_dt: datetime, reason: str) -> None:
+    """
+    Versucht mehrere Methoden, um einen Timeout zu setzen.
+    Wirft eine Exception weiter, wenn alle Pfade scheitern.
+    """
+    # 1) Neuere Libraries: Member.timeout(until=..., reason=...)
+    try:
+        await member.timeout(until=until_dt, reason=reason)
+        return
+    except AttributeError:
+        pass  # Methode existiert nicht
+    except Exception:
+        raise  # andere Fehler weitergeben
+
+    # 2) discord.py 2.x: .edit(communication_disabled_until=...)
+    try:
+        await member.edit(communication_disabled_until=until_dt, reason=reason)
+        return
+    except TypeError:
+        pass
+    except Exception:
+        raise
+
+    # 3) Ältere Schreibweise: .edit(timed_out_until=...)
+    try:
+        await member.edit(timed_out_until=until_dt, reason=reason)
+        return
+    except Exception:
+        raise
+
 async def fuehre_aktion_aus(guild_id:int, user_id:int, aktion:tuple[str,str], *, simulate:bool, timeout_min:int, msg:discord.Message|None, regel_name:str):
     """Führt (oder simuliert) die Aktion aus und antwortet im Channel auf Deutsch."""
     guild = bot.get_guild(guild_id)
@@ -438,21 +469,17 @@ async def fuehre_aktion_aus(guild_id:int, user_id:int, aktion:tuple[str,str], *,
                 pass
         return
 
-
-    # Chat-Hinweis (deutlich kenntlich bei Simulation)
-    if msg is not None:
-        prefix = "🧪 (Simulation) " if simulate else "⚠️ "
-        try:
-            text = await translate_text_for_guild(
-                guild_id,
-                f"{prefix}{akt.upper()} wegen **{regel_name}** – {grund}"
-            )
-            await msg.reply(text)
-        except Exception:
-            pass
-
+    # Simulation: sofort melden und abbrechen
     if simulate or member is None:
-        return  # im Simulationsmodus keine echte Maßnahme
+        if msg is not None:
+            try:
+                text = await translate_text_for_guild(
+                    guild_id, f"🧪 (Simulation) {akt.upper()} wegen **{regel_name}** – {grund}"
+                )
+                await msg.reply(text)
+            except Exception:
+                pass
+        return
 
     try:
         if akt == "warn":
@@ -463,9 +490,20 @@ async def fuehre_aktion_aus(guild_id:int, user_id:int, aktion:tuple[str,str], *,
         elif akt == "timeout":
             until = datetime.now(timezone.utc) + timedelta(minutes=timeout_min)
             try:
-                await member.timeout(until=until, reason=f"[Automod] {grund}")
-            except Exception:
-                pass
+                await set_member_timeout(member, until, reason=f"[Automod] {grund}")
+                if msg is not None:
+                    ok = await translate_text_for_guild(
+                        guild_id, f"⛔ Timeout gesetzt ({timeout_min} Minuten) wegen **{regel_name}** – {grund}"
+                    )
+                    await msg.reply(ok)
+            except Exception as e:
+                if msg is not None:
+                    fail = await translate_text_for_guild(
+                        guild_id,
+                        f"❌ Timeout fehlgeschlagen: {type(e).__name__}: {e}. "
+                        f"Bitte prüfe **Mitglieder moderieren**, Rollen-Hierarchie und Bot-Rechte."
+                    )
+                    await msg.reply(fail)
         elif akt == "kick":
             try:
                 await member.kick(reason=f"[Automod] {grund}")
