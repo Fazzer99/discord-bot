@@ -283,6 +283,49 @@ async def am_update_guild_cfg(guild_id: int, **fields):
         guild_id, *fields.values()
     )
 
+# --- Automod (Schritt 6) · Invite-Whitelist -------------------------------
+
+async def invite_whitelist_liste(guild_id: int) -> list[dict]:
+    rows = await db_pool.fetch(
+        "SELECT target_id, target_type FROM automod_invite_whitelist WHERE guild_id=$1",
+        guild_id
+    )
+    return [dict(r) for r in rows]
+
+async def invite_whitelist_add(guild_id: int, target_id: int, target_type: str):
+    await db_pool.execute("""
+        INSERT INTO automod_invite_whitelist (guild_id, target_id, target_type)
+        VALUES ($1,$2,$3)
+        ON CONFLICT (guild_id, target_id, target_type) DO NOTHING
+    """, guild_id, target_id, target_type)
+
+async def invite_whitelist_remove(guild_id: int, target_id: int, target_type: str):
+    await db_pool.execute("""
+        DELETE FROM automod_invite_whitelist
+        WHERE guild_id=$1 AND target_id=$2 AND target_type=$3
+    """, guild_id, target_id, target_type)
+
+async def invite_ist_erlaubt_in_context(message: discord.Message) -> bool:
+    """
+    True, wenn der aktuelle Kanal ODER eine Rolle des Autors auf der Invite-Whitelist steht.
+    """
+    rows = await db_pool.fetch(
+        "SELECT target_id, target_type FROM automod_invite_whitelist WHERE guild_id=$1",
+        message.guild.id
+    )
+    if not rows:
+        return False
+    # Kanal erlaubt?
+    for r in rows:
+        if r["target_type"] == "channel" and int(r["target_id"]) == message.channel.id:
+            return True
+    # Eine Rolle erlaubt?
+    autor_rollen = {role.id for role in getattr(message.author, "roles", [])}
+    for r in rows:
+        if r["target_type"] == "role" and int(r["target_id"]) in autor_rollen:
+            return True
+    return False
+
 # --- Automod (Schritt 3) · Heat-Basis --------------------------------------
 
 @dataclass
@@ -539,8 +582,7 @@ async def verarbeite_regel_treffer(msg: discord.Message, regel_name: str, grundp
     # Eigentümer/Administratoren ausnehmen
     if ist_exempt_member(msg.guild, msg.author):
         return
-
-
+     
     # Heat anwenden
     hit = RuleHit(regel_name=regel_name, grundpunkte=grundpunkte, kontext=kontext)
     neuer_heat = await heat_aktualisieren(msg.guild.id, msg.author.id, hit)
@@ -753,6 +795,55 @@ async def automod_timeout(ctx, minuten: int):
     minuten = max(1, int(minuten))
     await am_update_guild_cfg(ctx.guild.id, timeout_minutes=minuten)
     await reply(ctx, f"✅ Timeout-Dauer auf **{minuten} Minuten** gesetzt.")
+
+@bot.command(name="automod_invite_whitelist")
+@commands.has_permissions(manage_guild=True)
+async def automod_invite_whitelist(ctx, aktion: str, typ: str = None, ziel: str = None):
+    """
+    Verwalte die Invite-Whitelist.
+    Nutzung:
+      • !automod_invite_whitelist list
+      • !automod_invite_whitelist add channel #kanal
+      • !automod_invite_whitelist add role @rolle
+      • !automod_invite_whitelist remove channel #kanal
+      • !automod_invite_whitelist remove role @rolle
+    """
+    g = ctx.guild
+    aktion = (aktion or "").lower()
+
+    if aktion == "list":
+        eintraege = await invite_whitelist_liste(g.id)
+        if not eintraege:
+            return await reply(ctx, "ℹ️ Invite-Whitelist ist leer.")
+        zeilen = []
+        for e in eintraege:
+            if e["target_type"] == "channel":
+                ch = g.get_channel(int(e["target_id"]))
+                zeilen.append(f"• Kanal: {ch.mention if ch else e['target_id']}")
+            else:
+                rl = g.get_role(int(e["target_id"]))
+                zeilen.append(f"• Rolle: {rl.mention if rl else e['target_id']}")
+        text = "✅ Invite-Whitelist:\n" + "\n".join(zeilen)
+        return await ctx.send(await translate_text_for_guild(g.id, text))
+
+    if aktion not in ("add", "remove") or typ not in ("channel", "role") or ziel is None:
+        return await reply(ctx, "Verwendung: `!automod_invite_whitelist list | add/remove <channel|role> <#kanal|@rolle>`")
+
+    if typ == "channel":
+        if not ctx.message.channel_mentions:
+            return await reply(ctx, "Bitte einen Kanal mentionen, z. B. `#promo`.")
+        target_id = ctx.message.channel_mentions[0].id
+    else:  # role
+        if not ctx.message.role_mentions:
+            return await reply(ctx, "Bitte eine Rolle mentionen, z. B. `@Partner`.")
+        target_id = ctx.message.role_mentions[0].id
+
+    if aktion == "add":
+        await invite_whitelist_add(g.id, target_id, typ)
+        return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: **{typ}**.")
+    else:
+        await invite_whitelist_remove(g.id, target_id, typ)
+        return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: **{typ}**.")
 
 @bot.command(name="automod_debug_perms")
 @commands.has_permissions(manage_guild=True)
@@ -2060,10 +2151,14 @@ async def on_message(message: discord.Message):
 
     inhalt = (message.content or "").lower()
     if any(s in inhalt for s in INVITE_SNIPPETS):
+        # Invite nur prüfen, wenn nicht whitelist-freigegeben
+        erlaubt = await invite_ist_erlaubt_in_context(message)
+        if erlaubt:
+            return  # in diesem Kontext sind Invite-Links erlaubt
         await verarbeite_regel_treffer(
             message,
             regel_name="invite_link",
-            grundpunkte=18.0,  # Startwert; feintunen wir später
+            grundpunkte=18.0,
             kontext={"gefunden": "invite_link"}
         )
 
