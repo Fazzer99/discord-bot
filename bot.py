@@ -811,43 +811,49 @@ async def automod_invite_whitelist(ctx, aktion: str, typ: str = None, ziel: str 
     g = ctx.guild
     aktion = (aktion or "").lower()
 
-    if aktion == "add":
-        if typ == "channel":
-            channel = ctx.message.channel_mentions[0]
-            await invite_whitelist_add(g.id, channel.id, typ)
-            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: {channel.mention}")
-        else:  # role
-            role = ctx.message.role_mentions[0]
-            await invite_whitelist_add(g.id, role.id, typ)
-            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: @{role.name}")
-    else:  # remove
-        if typ == "channel":
-            channel = ctx.message.channel_mentions[0]
-            await invite_whitelist_remove(g.id, channel.id, typ)
-            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: {channel.mention}")
-        else:  # role
-            role = ctx.message.role_mentions[0]
-            await invite_whitelist_remove(g.id, role.id, typ)
-            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: @{role.name}")
+    # LISTEN-AKTION
+    if aktion == "list":
+        eintraege = await invite_whitelist_liste(g.id)
+        if not eintraege:
+            return await reply(ctx, "ℹ️ Invite-Whitelist ist leer.")
+        zeilen = []
+        for e in eintraege:
+            if e["target_type"] == "channel":
+                ch = g.get_channel(int(e["target_id"]))
+                zeilen.append(f"• Kanal: {ch.mention if ch else e['target_id']}")
+            else:
+                rl = g.get_role(int(e["target_id"]))
+                zeilen.append(f"• Rolle: {rl.mention if rl else e['target_id']}")
+        text = "✅ Invite-Whitelist:\n" + "\n".join(zeilen)
+        return await ctx.send(await translate_text_for_guild(g.id, text))
 
+    # PARAMETER-PRÜFUNG
     if aktion not in ("add", "remove") or typ not in ("channel", "role") or ziel is None:
         return await reply(ctx, "Verwendung: `!automod_invite_whitelist list | add/remove <channel|role> <#kanal|@rolle>`")
 
+    # ZIEL PRÜFEN UND SPEICHERN
     if typ == "channel":
         if not ctx.message.channel_mentions:
             return await reply(ctx, "Bitte einen Kanal mentionen, z. B. `#promo`.")
-        target_id = ctx.message.channel_mentions[0].id
+        target = ctx.message.channel_mentions[0]
     else:  # role
         if not ctx.message.role_mentions:
             return await reply(ctx, "Bitte eine Rolle mentionen, z. B. `@Partner`.")
-        target_id = ctx.message.role_mentions[0].id
+        target = ctx.message.role_mentions[0]
 
+    # HINZUFÜGEN / ENTFERNEN
     if aktion == "add":
-        await invite_whitelist_add(g.id, target_id, typ)
-        return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: **{typ}**.")
-    else:
-        await invite_whitelist_remove(g.id, target_id, typ)
-        return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: **{typ}**.")
+        await invite_whitelist_add(g.id, target.id, typ)
+        if typ == "channel":
+            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: {target.mention}")
+        else:
+            return await reply(ctx, f"✅ Zur Invite-Whitelist hinzugefügt: @{target.name}")
+    else:  # remove
+        await invite_whitelist_remove(g.id, target.id, typ)
+        if typ == "channel":
+            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: {target.mention}")
+        else:
+            return await reply(ctx, f"✅ Von der Invite-Whitelist entfernt: @{target.name}")
 
 @bot.command(name="automod_debug_perms")
 @commands.has_permissions(manage_guild=True)
