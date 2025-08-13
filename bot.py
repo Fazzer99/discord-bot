@@ -283,6 +283,69 @@ async def am_update_guild_cfg(guild_id: int, **fields):
         guild_id, *fields.values()
     )
 
+# --- Automod (Schritt 3) · Heat-Basis --------------------------------------
+
+@dataclass
+class RuleHit:
+    regel_name: str
+    grundpunkte: float
+    kontext: dict
+
+def heat_decay(alter_wert: float, sekunden: float, halbwertszeit_min: int) -> float:
+    """Berechnet den Heat-Verfall (Decay) basierend auf Halbwertszeit."""
+    if halbwertszeit_min <= 0:
+        return 0.0
+    lam = math.log(2) / (halbwertszeit_min * 60.0)
+    return alter_wert * math.exp(-lam * sekunden)
+
+async def heat_aktualisieren(guild_id: int, user_id: int, hit: RuleHit):
+    """Wendet einen Heat-Hit an, inkl. Decay, Speichern und Event-Log."""
+    cfg = await am_get_guild_cfg(guild_id)
+    if not cfg:
+        return  # Automod noch nicht initialisiert
+
+    # Strictness-Multiplikatoren
+    s = int(cfg["strictness"])
+    sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
+    w_s = 0.5 + sig  # Punkte-Multiplikator
+
+    # Aktuellen Heat lesen
+    row = await db_pool.fetchrow(
+        "SELECT heat_value, last_update FROM automod_user_heat WHERE guild_id=$1 AND user_id=$2",
+        guild_id, user_id
+    )
+    jetzt = datetime.now(timezone.utc)
+    if row:
+        alt_heat = float(row["heat_value"])
+        sekunden_seit_update = (jetzt - row["last_update"]).total_seconds()
+        alt_heat = heat_decay(alt_heat, sekunden_seit_update, int(cfg["halflife_minutes"]))
+    else:
+        alt_heat = 0.0
+
+    # Punkte berechnen
+    punkte = hit.grundpunkte * w_s
+    neu_heat = alt_heat + punkte
+
+    # Speichern
+    if row:
+        await db_pool.execute(
+            "UPDATE automod_user_heat SET heat_value=$1, last_update=$2 WHERE guild_id=$3 AND user_id=$4",
+            neu_heat, jetzt, guild_id, user_id
+        )
+    else:
+        await db_pool.execute(
+            "INSERT INTO automod_user_heat (guild_id, user_id, heat_value, last_update) VALUES ($1,$2,$3,$4)",
+            guild_id, user_id, neu_heat, jetzt
+        )
+
+    # Event loggen
+    await db_pool.execute("""
+        INSERT INTO automod_events (guild_id, user_id, rule_key, points_raw, strictness, points_final, message_id, channel_id, context)
+        VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,$7::jsonb)
+    """, guild_id, user_id, hit.regel_name, hit.grundpunkte, s, punkte, json.dumps(hit.kontext or {}))
+
+    return neu_heat
+
 # --- Startup --------------------------------------------------------------
 @bot.event
 async def on_ready():
@@ -406,7 +469,47 @@ async def automod_simulate(ctx, mode: str):
         return await reply(ctx, "Verwendung: `!automod_simulate on|off`")
     await am_update_guild_cfg(ctx.guild.id, simulate=(m == "on"))
     await reply(ctx, f"✅ Simulationsmodus = **{ 'AN' if m == 'on' else 'AUS' }**.")
-    
+
+@bot.command(name="automod_addheat")
+@commands.has_permissions(manage_guild=True)
+async def automod_addheat(ctx, member: discord.Member, punkte: float):
+    """
+    Fügt einem Benutzer manuell Heat hinzu (nur Test).
+    """
+    hit = RuleHit(
+        regel_name="manuell",
+        grundpunkte=punkte,
+        kontext={"quelle": "manueller Test"}
+    )
+    neu = await heat_aktualisieren(ctx.guild.id, member.id, hit)
+    if neu is None:
+        return await reply(ctx, "ℹ️ Automod ist für diesen Server noch nicht eingerichtet.")
+    await reply(ctx, f"✅ Neuer Heat-Wert für {member.mention}: **{neu:.1f}** Punkte.")
+
+@bot.command(name="automod_myheat")
+async def automod_myheat(ctx):
+    """
+    Zeigt den aktuellen Heat-Wert des aufrufenden Benutzers.
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ Automod ist für diesen Server noch nicht eingerichtet.")
+
+    row = await db_pool.fetchrow(
+        "SELECT heat_value, last_update FROM automod_user_heat WHERE guild_id=$1 AND user_id=$2",
+        ctx.guild.id, ctx.author.id
+    )
+    if not row:
+        return await reply(ctx, "Du hast aktuell **0** Heat-Punkte.")
+
+    jetzt = datetime.now(timezone.utc)
+    aktueller_heat = heat_decay(
+        float(row["heat_value"]),
+        (jetzt - row["last_update"]).total_seconds(),
+        int(cfg["halflife_minutes"])
+    )
+    await reply(ctx, f"🔥 Dein aktueller Heat-Wert: **{aktueller_heat:.1f}** Punkte.")
+
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
