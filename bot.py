@@ -370,6 +370,44 @@ async def automod_status(ctx):
     out = await translate_text_for_guild(ctx.guild.id, text_de)
     await ctx.send(out)
 
+@bot.command(name="automod_strictness")
+@commands.has_permissions(manage_guild=True)
+async def automod_strictness(ctx, value: int):
+    """
+    Setzt die Strenge (0–100). Je höher, desto empfindlicher.
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ No automod config yet. Run `!automod_init` first.")
+    value = max(0, min(100, int(value)))
+    await am_update_guild_cfg(ctx.guild.id, strictness=value)
+    # kleine Live-Anzeige der Gewichte
+    s = value
+    sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
+    w_s = 0.5 + sig
+    t_s = 1.5 - sig
+    txt = (
+        f"✅ Strictness set to **{value}** "
+        f"(w_s≈{w_s:.2f}, t_s≈{t_s:.2f})."
+    )
+    await reply(ctx, txt)
+
+@bot.command(name="automod_simulate")
+@commands.has_permissions(manage_guild=True)
+async def automod_simulate(ctx, mode: str):
+    """
+    Schaltet Simulationsmodus (keine echten Strafen) an/aus.
+    Nutzung: !automod_simulate on | off
+    """
+    cfg = await am_get_guild_cfg(ctx.guild.id)
+    if not cfg:
+        return await reply(ctx, "ℹ️ No automod config yet. Run `!automod_init` first.")
+    m = mode.lower()
+    if m not in ("on", "off"):
+        return await reply(ctx, "Usage: `!automod_simulate on|off`")
+    await am_update_guild_cfg(ctx.guild.id, simulate=(m == "on"))
+    await reply(ctx, f"✅ Simulate = **{m.upper()}**.")
+
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
