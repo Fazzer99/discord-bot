@@ -333,40 +333,39 @@ async def on_command_error(ctx, error):
 @commands.has_permissions(manage_guild=True)
 async def automod_init(ctx):
     """
-    Legt die Default-Automod-Zeile für diese Guild an.
-    (Schema muss bereits per psql angelegt sein.)
+    Legt die Standard-Automod-Konfiguration für diese Guild an.
+    (Das Datenbankschema muss vorher per psql angelegt sein.)
     """
     await am_upsert_guild_defaults(ctx.guild.id)
-    await reply(ctx, "✅ Automod-Grundkonfiguration angelegt (Simulate=ON, Timeout aktiv, Kick/Ban aus).")
+    await reply(ctx, "✅ Automod-Grundkonfiguration angelegt (Simulate=AN, Timeout aktiv, Kick/Ban AUS).")
 
 @bot.command(name="automod_status")
 @commands.has_permissions(manage_guild=True)
 async def automod_status(ctx):
     """
-    Zeigt die aktuelle Automod-Konfiguration (2-sprachig).
+    Zeigt die aktuelle Automod-Konfiguration.
     """
     cfg = await am_get_guild_cfg(ctx.guild.id)
     if not cfg:
-        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration. Bitte `!automod_init` ausführen.")
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration vorhanden. Bitte zuerst `!automod_init` ausführen.")
 
-    # Gewichte anzeigen (nur Info – Logik folgt in Schritt 2)
+    # Gewichte anzeigen (nur Info – Logik folgt in späterem Schritt)
     s = int(cfg["strictness"])
     sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
     w_s = 0.5 + sig      # ~0.5..1.5
     t_s = 1.5 - sig      # ~0.5..1.5
 
     text_de = (
-        "🔧 **Automod Status**\n"
-        f"• Strictness: {s}  (w_s≈{w_s:.2f}, t_s≈{t_s:.2f})\n"
-        f"• Halflife: {cfg['halflife_minutes']} min\n"
-        f"• Simulate: {cfg['simulate']}\n"
-        f"• Aktionen: warn={cfg['action_warn']} | timeout={cfg['action_timeout']} | "
-        f"kick={cfg['action_kick']} | ban={cfg['action_ban']}\n"
-        f"• Schwellen: warn={cfg['t_warn']} | timeout={cfg['t_timeout']} | "
-        f"kick={cfg['t_kick']} | ban={cfg['t_ban']}\n"
-        f"• Timeout-Dauer: {cfg['timeout_minutes']} min"
+        "🔧 **Automod-Status**\n"
+        f"• Strenge: {s}  (w_s≈{w_s:.2f}, t_s≈{t_s:.2f})\n"
+        f"• Halbwertszeit: {cfg['halflife_minutes']} Minuten\n"
+        f"• Simulationsmodus: {cfg['simulate']}\n"
+        f"• Aktionen: Warnung={cfg['action_warn']} | Timeout={cfg['action_timeout']} | "
+        f"Kick={cfg['action_kick']} | Ban={cfg['action_ban']}\n"
+        f"• Schwellen: Warnung={cfg['t_warn']} | Timeout={cfg['t_timeout']} | "
+        f"Kick={cfg['t_kick']} | Ban={cfg['t_ban']}\n"
+        f"• Timeout-Dauer: {cfg['timeout_minutes']} Minuten"
     )
-    # 2-sprachig mit deinem DeepL-Flow:
     out = await translate_text_for_guild(ctx.guild.id, text_de)
     await ctx.send(out)
 
@@ -374,20 +373,20 @@ async def automod_status(ctx):
 @commands.has_permissions(manage_guild=True)
 async def automod_strictness(ctx, value: int):
     """
-    Setzt die Strenge (0–100). Je höher, desto empfindlicher.
+    Setzt die Strenge (0–100). Je höher, desto empfindlicher reagiert das System.
     """
     cfg = await am_get_guild_cfg(ctx.guild.id)
     if not cfg:
-        return await reply(ctx, "ℹ️ No automod config yet. Run `!automod_init` first.")
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration vorhanden. Bitte zuerst `!automod_init` ausführen.")
     value = max(0, min(100, int(value)))
     await am_update_guild_cfg(ctx.guild.id, strictness=value)
-    # kleine Live-Anzeige der Gewichte
+
     s = value
     sig = 1.0 / (1.0 + math.exp(-0.08 * (s - 50)))
     w_s = 0.5 + sig
     t_s = 1.5 - sig
     txt = (
-        f"✅ Strictness set to **{value}** "
+        f"✅ Strenge auf **{value}** gesetzt "
         f"(w_s≈{w_s:.2f}, t_s≈{t_s:.2f})."
     )
     await reply(ctx, txt)
@@ -396,18 +395,18 @@ async def automod_strictness(ctx, value: int):
 @commands.has_permissions(manage_guild=True)
 async def automod_simulate(ctx, mode: str):
     """
-    Schaltet Simulationsmodus (keine echten Strafen) an/aus.
+    Schaltet den Simulationsmodus (keine echten Strafen) an oder aus.
     Nutzung: !automod_simulate on | off
     """
     cfg = await am_get_guild_cfg(ctx.guild.id)
     if not cfg:
-        return await reply(ctx, "ℹ️ No automod config yet. Run `!automod_init` first.")
+        return await reply(ctx, "ℹ️ Noch keine Automod-Konfiguration vorhanden. Bitte zuerst `!automod_init` ausführen.")
     m = mode.lower()
     if m not in ("on", "off"):
-        return await reply(ctx, "Usage: `!automod_simulate on|off`")
+        return await reply(ctx, "Verwendung: `!automod_simulate on|off`")
     await am_update_guild_cfg(ctx.guild.id, simulate=(m == "on"))
-    await reply(ctx, f"✅ Simulate = **{m.upper()}**.")
-
+    await reply(ctx, f"✅ Simulationsmodus = **{ 'AN' if m == 'on' else 'AUS' }**.")
+    
 @bot.command(name="setup")
 @commands.has_permissions(manage_guild=True)
 async def setup(ctx, module: str):
