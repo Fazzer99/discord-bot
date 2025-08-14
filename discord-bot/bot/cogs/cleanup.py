@@ -5,18 +5,16 @@ from datetime import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import List
 
-from ..utils.replies import reply_text
 from ..utils.checks import require_manage_messages
+from ..utils.replies import reply_text
+from ..services.translation import translate_text_for_guild
 
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
 def _compute_pre_notify(interval: float) -> float | None:
-    if interval >= 3600:
-        return interval - 3600
-    if interval >= 300:
-        return interval - 300
+    if interval >= 3600: return interval - 3600
+    if interval >= 300:  return interval - 300
     return None
 
 def age_seconds(msg: discord.Message) -> float:
@@ -44,92 +42,78 @@ class CleanupCog(commands.Cog):
 
     @app_commands.command(
         name="cleanup",
-        description="Starte wiederkehrende automatische Nachrichtenlöschung in Kanälen."
+        description="Löscht Nachrichten eines Kanals in einem wiederkehrenden Intervall."
     )
     @require_manage_messages()
     @app_commands.describe(
-        channels="Textkanäle, in denen gelöscht werden soll",
-        days="Intervall in Tagen",
-        minutes="Zusätzliches Intervall in Minuten"
+        channel="Textkanal",
+        days="Tage zwischen Löschläufen",
+        minutes="Minuten zusätzlich"
     )
     async def cleanup(
         self,
         interaction: discord.Interaction,
-        channels: List[discord.TextChannel],
+        channel: discord.TextChannel,
         days: int,
         minutes: int
     ):
-        if not channels:
-            return await reply_text(interaction, "❌ Bitte mindestens einen Kanal angeben.", kind="error")
-
         interval = days * 86400 + minutes * 60
         if interval <= 0:
             return await reply_text(interaction, "❌ Ungültiges Intervall.", kind="error")
 
-        await reply_text(
-            interaction,
-            f"🗑️ Nachrichten in {', '.join(ch.mention for ch in channels)} werden alle {days} Tage und {minutes} Minuten gelöscht.",
-            kind="info"
-        )
+        # vorigen Task stoppen
+        if channel.id in cleanup_tasks:
+            cleanup_tasks[channel.id].cancel()
 
-        for ch in channels:
-            if ch.id in cleanup_tasks:
-                cleanup_tasks[ch.id].cancel()
+        async def _loop_cleanup(ch: discord.TextChannel, interval_s: float):
+            await _purge_all(ch)
+            try:
+                msg = await translate_text_for_guild(ch.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+                await ch.send(msg)
+            except discord.Forbidden:
+                pass
 
-            async def _loop_cleanup(channel: discord.TextChannel, interval_s: float):
-                # Initial: alles löschen
-                await _purge_all(channel)
+            pre = _compute_pre_notify(interval_s)
+            while True:
+                if pre is not None:
+                    await asyncio.sleep(pre)
+                    wm = (interval_s - pre) / 60
+                    text = (f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)")
+                    warn = await translate_text_for_guild(ch.guild.id, f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
+                    await ch.send(warn)
+                    await asyncio.sleep(interval_s - pre)
+                else:
+                    await asyncio.sleep(interval_s)
+
+                await _purge_all(ch)
                 try:
-                    await reply_text(channel, "🗑️ Alle Nachrichten wurden automatisch gelöscht.", kind="success")
+                    msg = await translate_text_for_guild(ch.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht.")
+                    await ch.send(msg)
                 except discord.Forbidden:
                     pass
 
-                pre = _compute_pre_notify(interval_s)
-                while True:
-                    if pre is not None:
-                        await asyncio.sleep(pre)
-                        wm = (interval_s - pre) / 60
-                        text = (f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)")
-                        try:
-                            await reply_text(channel, f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.", kind="warning")
-                        except discord.Forbidden:
-                            pass
-                        await asyncio.sleep(interval_s - pre)
-                    else:
-                        await asyncio.sleep(interval_s)
+        task = self.bot.loop.create_task(_loop_cleanup(channel, interval))
+        cleanup_tasks[channel.id] = task
 
-                    await _purge_all(channel)
-                    try:
-                        await reply_text(channel, "🗑️ Alle Nachrichten wurden automatisch gelöscht.", kind="success")
-                    except discord.Forbidden:
-                        pass
-
-            task = self.bot.loop.create_task(_loop_cleanup(ch, interval))
-            cleanup_tasks[ch.id] = task
+        return await reply_text(
+            interaction,
+            f"🗑️ Nachrichten in {channel.mention} werden alle {days} Tage und {minutes} Minuten gelöscht.",
+            kind="info"
+        )
 
     @app_commands.command(
         name="cleanup_stop",
-        description="Stoppe die automatische Nachrichtenlöschung in Kanälen."
+        description="Stoppt die automatische Löschung."
     )
     @require_manage_messages()
-    @app_commands.describe(
-        channels="Textkanäle, in denen das Löschen gestoppt werden soll"
-    )
-    async def cleanup_stop(
-        self,
-        interaction: discord.Interaction,
-        channels: List[discord.TextChannel]
-    ):
-        if not channels:
-            return await reply_text(interaction, "❌ Bitte mindestens einen Kanal angeben.", kind="error")
-
-        for ch in channels:
-            task = cleanup_tasks.pop(ch.id, None)
-            if task:
-                task.cancel()
-                await reply_text(interaction, f"🛑 Automatische Löschung in {ch.mention} gestoppt.", kind="success")
-            else:
-                await reply_text(interaction, f"ℹ️ Keine laufende Löschung in {ch.mention} gefunden.", kind="warning")
+    @app_commands.describe(channel="Textkanal")
+    async def cleanup_stop(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        task = cleanup_tasks.pop(channel.id, None)
+        if task:
+            task.cancel()
+            return await reply_text(interaction, f"🛑 Automatische Löschung in {channel.mention} gestoppt.", kind="success")
+        else:
+            return await reply_text(interaction, f"ℹ️ Keine laufende Löschung in {channel.mention} gefunden.", kind="info")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(CleanupCog(bot))
