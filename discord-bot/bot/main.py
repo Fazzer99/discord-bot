@@ -41,6 +41,17 @@ class FazzerBot(commands.Bot):
                 log.info(f"Cog geladen: {ext}")
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
+        
+        # Alte globale Commands säubern und frisch setzen
+        try:
+            self.tree.clear_commands(guild=None)      # globale Liste lokal leeren
+            await self.tree.sync(guild=None)          # leere Liste pushen (löscht alte)
+            # optional: testweise nur für 1 Guild registrieren (schneller sichtbar):
+            # TEST_GUILD_ID = 123456789012345678
+            # await self.tree.sync(guild=discord.Object(id=TEST_GUILD_ID))
+        except Exception as e:
+            log.exception(f"Command-Reset fehlgeschlagen: {e}")
+
 
         # 3) Slash-Commands sync (global)
         try:
