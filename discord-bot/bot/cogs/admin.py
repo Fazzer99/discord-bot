@@ -3,45 +3,36 @@ from __future__ import annotations
 import asyncio
 import json
 import discord
-from typing import List
 from discord import app_commands
 from discord.ext import commands
+
 from ..utils.checks import require_manage_guild
 from ..utils.replies import reply_text
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..db import execute, fetchrow
 
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    #
-    # /setlang — 1:1 zu deinem alten !setlang, nur Slash + Embeds
-    #
+    # /setlang
     @app_commands.command(name="setlang", description="Setzt die Bot-Sprache für diesen Server (de|en)")
     @require_manage_guild()
     @app_commands.describe(lang="Zulässig: de | en")
     async def setlang(self, interaction: discord.Interaction, lang: str):
         lang = (lang or "").strip().lower()
         if lang not in ("de", "en"):
-            return await reply_text(
-                interaction,
-                "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.",
-                kind="error"
-            )
+            return await reply_text(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", kind="error")
 
         await update_guild_cfg(interaction.guild.id, lang=lang)
-
         if lang == "de":
-            msg = "✅ Sprache gesetzt auf **Deutsch**. Deutsche Texte bleiben deutsch."
+            msg = "✅ Sprache gesetzt auf **Deutsch**."
         else:
-            msg = "✅ Language set to **English**. German texts will be auto-translated to English."
-
+            msg = "✅ Language set to **English**."
         return await reply_text(interaction, msg, kind="success")
 
-    #
-    # Globaler Slash-Check – entspricht deinem @bot.check ensure_lang_set
-    #
+    # Globaler Slash-Check
     @staticmethod
     async def ensure_lang_set(interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
@@ -49,94 +40,59 @@ class AdminCog(commands.Cog):
         cmd_name = interaction.command.name if interaction.command else ""
         if cmd_name == "setlang":
             return True
-
         cfg = await get_guild_cfg(interaction.guild.id)
         lang = (cfg.get("lang") or "").lower()
         if lang in ("de", "en"):
             return True
-
-        text = (
-            "🌐 Bitte zuerst die Sprache wählen mit `/setlang de` oder `/setlang en`.\n"
-            "🌐 Please choose a language first: `/setlang de` or `/setlang en`."
+        await reply_text(
+            interaction,
+            "🌐 Bitte zuerst die Sprache wählen mit `/setlang de` oder `/setlang en`.",
+            kind="warning"
         )
-        try:
-            await reply_text(interaction, text, kind="warning")
-        finally:
-            raise app_commands.CheckFailure("Guild language not set")
+        raise app_commands.CheckFailure("Guild language not set")
 
-    #
-    # /setup — interaktiver Wizard (Welcome/Leave/vc_override/autorole/vc_track)
-    #
+    # /setup
     @app_commands.command(name="setup", description="Interaktives Setup für Module (welcome, leave, vc_override, autorole, vc_track)")
     @require_manage_guild()
-    @app_commands.describe(module="Zulässig: welcome | leave | vc_override | autorole | vc_track")
+    @app_commands.describe(module="welcome | leave | vc_override | autorole | vc_track")
     async def setup(self, interaction: discord.Interaction, module: str):
-        module = (module or "").lower()
+        module = module.lower()
         valid = ("welcome", "leave", "vc_override", "autorole", "vc_track")
         if module not in valid:
-            return await reply_text(
-                interaction,
-                "❌ Unbekanntes Modul. Verfügbar: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.",
-                kind="error"
-            )
+            return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
 
-        await interaction.response.defer()  # öffentlich
-
+        await interaction.response.defer()
         author = interaction.user
         channel = interaction.channel
 
-        def _check_author_same_channel(msg: discord.Message) -> bool:
-            return (msg.author == author) and (msg.channel == channel)
+        def check_msg(msg: discord.Message, cond) -> bool:
+            return msg.author == author and msg.channel == channel and cond(msg)
 
-        # ─── vc_override ───────────────────────────────────────────────────────
+        # vc_override
         if module == "vc_override":
-            await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, für den das Override gelten soll.", kind="info")
-            def check_chan(m: discord.Message):
-                return _check_author_same_channel(m) and m.channel_mentions
+            await reply_text(channel, "❓ Bitte erwähne den Sprachkanal.", kind="info")
             try:
-                msg_chan = await self.bot.wait_for("message", check=check_chan, timeout=60)
+                msg_chan = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
             except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.", kind="warning")
+                return await reply_text(channel, "⏰ Zeit abgelaufen.", kind="warning")
             vc_channel = msg_chan.channel_mentions[0]
 
-            row = await fetchrow(
-                "SELECT 1 AS x FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
-                interaction.guild.id, vc_channel.id
-            )
+            row = await fetchrow("SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+                                 interaction.guild.id, vc_channel.id)
             if row:
-                return await reply_text(
-                    channel,
-                    f"❌ Für {vc_channel.mention} ist bereits **vc_track** aktiv. Bitte zuerst `!disable vc_track` ausführen oder einen anderen Kanal wählen.",
-                    kind="error"
-                )
+                return await reply_text(channel, f"❌ {vc_channel.mention} ist bereits **vc_track**.", kind="error")
 
-            await reply_text(channel, "❓ Bitte erwähne **Override-Rollen** (z.B. `@Admin @Moderator`).", kind="info")
-            def check_override(m: discord.Message):
-                return _check_author_same_channel(m) and m.role_mentions
-            try:
-                msg_o = await self.bot.wait_for("message", check=check_override, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ Override-Rollen erwähnen.", kind="info")
+            msg_o = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
             override_ids = [r.id for r in msg_o.role_mentions]
 
-            await reply_text(channel, "❓ Bitte erwähne **Ziel-Rollen**, die automatisch Zugriff erhalten sollen.", kind="info")
-            def check_target(m: discord.Message):
-                return _check_author_same_channel(m) and m.role_mentions
-            try:
-                msg_t = await self.bot.wait_for("message", check=check_target, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ Ziel-Rollen erwähnen.", kind="info")
+            msg_t = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
             target_ids = [r.id for r in msg_t.role_mentions]
 
-            await reply_text(channel, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).", kind="info")
-            def check_vclog(m: discord.Message):
-                return _check_author_same_channel(m) and m.channel_mentions
-            try:
-                msg_log = await self.bot.wait_for("message", check=check_vclog, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_override` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ VC-Log-Kanal erwähnen.", kind="info")
+            msg_log = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
             vc_log_channel = msg_log.channel_mentions[0]
-
             await update_guild_cfg(interaction.guild.id, vc_log_channel=vc_log_channel.id)
 
             await execute(
@@ -145,248 +101,125 @@ class AdminCog(commands.Cog):
                 VALUES ($1, $2, $3::jsonb, $4::jsonb)
                 ON CONFLICT (guild_id, channel_id) DO UPDATE
                   SET override_roles = EXCLUDED.override_roles,
-                      target_roles   = EXCLUDED.target_roles;
+                      target_roles   = EXCLUDED.target_roles
                 """,
-                interaction.guild.id,
-                vc_channel.id,
-                json.dumps(override_ids),
-                json.dumps(target_ids),
+                interaction.guild.id, vc_channel.id,
+                json.dumps(override_ids), json.dumps(target_ids)
             )
+            return await reply_text(channel, f"🎉 **vc_override** für {vc_channel.mention} gespeichert.", kind="success")
 
-            return await reply_text(
-                channel,
-                f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}!\nOverride-Rollen und Ziel-Rollen wurden gespeichert.",
-                kind="success"
-            )
-
-        # ─── vc_track ─────────────────────────────────────────────────────────
+        # vc_track
         if module == "vc_track":
-            await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.", kind="info")
-            def check_chan2(m: discord.Message):
-                return _check_author_same_channel(m) and m.channel_mentions
-            try:
-                msg_chan = await self.bot.wait_for("message", check=check_chan2, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ Bitte Sprachkanal erwähnen.", kind="info")
+            msg_chan = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
             vc_channel = msg_chan.channel_mentions[0]
 
-            row = await fetchrow(
-                "SELECT 1 AS x FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
-                interaction.guild.id, vc_channel.id
-            )
+            row = await fetchrow("SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+                                 interaction.guild.id, vc_channel.id)
             if row:
-                return await reply_text(
-                    channel,
-                    f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. Bitte zuerst `!disable vc_override` (optional mit Kanal) ausführen oder einen anderen Kanal wählen.",
-                    kind="error"
-                )
+                return await reply_text(channel, f"❌ {vc_channel.mention} ist bereits **vc_override**.", kind="error")
 
             cfg = await get_guild_cfg(interaction.guild.id)
             if not cfg.get("vc_log_channel"):
-                await reply_text(channel, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).", kind="info")
-                def check_vclog2(m: discord.Message):
-                    return _check_author_same_channel(m) and m.channel_mentions
-                try:
-                    msg_log = await self.bot.wait_for("message", check=check_vclog2, timeout=60)
-                except asyncio.TimeoutError:
-                    return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup vc_track` neu ausführen.", kind="warning")
+                await reply_text(channel, "❓ VC-Log-Kanal erwähnen.", kind="info")
+                msg_log = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
                 log_ch = msg_log.channel_mentions[0]
                 await update_guild_cfg(interaction.guild.id, vc_log_channel=log_ch.id)
 
-            row2 = await fetchrow(
-                "SELECT 1 AS x FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
-                interaction.guild.id, vc_channel.id
-            )
+            row2 = await fetchrow("SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+                                  interaction.guild.id, vc_channel.id)
             if row2:
-                return await reply_text(channel, f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.", kind="info")
+                return await reply_text(channel, f"ℹ️ VC-Tracking für {vc_channel.mention} schon aktiv.", kind="info")
 
-            await execute(
-                "INSERT INTO vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
-                interaction.guild.id, vc_channel.id
-            )
+            await execute("INSERT INTO vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
+                          interaction.guild.id, vc_channel.id)
+            return await reply_text(channel, f"🎉 VC-Tracking aktiv für {vc_channel.mention}.", kind="success")
 
-            return await reply_text(channel, f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.", kind="success")
-
-        # ─── autorole ─────────────────────────────────────────────────────────
+        # autorole
         if module == "autorole":
-            await reply_text(channel, "❓ Bitte erwähne die Rolle, die neuen Mitgliedern automatisch zugewiesen werden soll.", kind="info")
-            def check_role(m: discord.Message):
-                return _check_author_same_channel(m) and m.role_mentions
-            try:
-                msg_r = await self.bot.wait_for("message", check=check_role, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup autorole` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ Rolle erwähnen.", kind="info")
+            msg_r = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
             autorole = msg_r.role_mentions[0]
             await update_guild_cfg(interaction.guild.id, default_role=autorole.id)
-            return await reply_text(
-                channel,
-                f"🎉 **autorole**-Setup abgeschlossen! Neue Mitglieder bekommen die Rolle {autorole.mention}.",
-                kind="success"
-            )
+            return await reply_text(channel, f"🎉 Autorole: {autorole.mention}.", kind="success")
 
-        # ─── Gemeinsames Setup: Kanal abfragen (welcome/leave) ─────────────────
-        await reply_text(channel, f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.", kind="info")
-        def check_chan3(m: discord.Message):
-            return _check_author_same_channel(m) and m.channel_mentions
-        try:
-            msg = await self.bot.wait_for("message", check=check_chan3, timeout=60)
-        except asyncio.TimeoutError:
-            return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.", kind="warning")
+        # welcome / leave
+        await reply_text(channel, "❓ Kanal erwähnen.", kind="info")
+        msg = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
         target_channel = msg.channel_mentions[0]
         await update_guild_cfg(interaction.guild.id, **{f"{module}_channel": target_channel.id})
 
         if module == "welcome":
-            await reply_text(channel, "❓ Bitte erwähne die Rolle, die die Willkommens-Nachricht auslöst.", kind="info")
-            def check_role2(m: discord.Message):
-                return _check_author_same_channel(m) and m.role_mentions
-            try:
-                msgr = await self.bot.wait_for("message", check=check_role2, timeout=60)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup welcome` neu ausführen.", kind="warning")
+            await reply_text(channel, "❓ Rolle für Willkommensnachricht erwähnen.", kind="info")
+            msgr = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
             await update_guild_cfg(interaction.guild.id, welcome_role=msgr.role_mentions[0].id)
 
         if module in ("welcome", "leave"):
-            await reply_text(
-                channel,
-                f"✅ Kanal gesetzt auf {target_channel.mention}. Jetzt den Nachrichtentext eingeben.\nVerwende Platzhalter:\n`{{member}}` → Member-Erwähnung\n`{{guild}}`  → Server-Name",
-                kind="info"
-            )
-            def check_txt(m: discord.Message):
-                return _check_author_same_channel(m) and (m.content.strip() != "")
-            try:
-                msg2 = await self.bot.wait_for("message", check=check_txt, timeout=300)
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `!setup` neu ausführen.", kind="warning")
-
+            await reply_text(channel, "✅ Kanal gesetzt. Nachrichtentext eingeben.", kind="info")
+            msg2 = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: bool(x.content.strip())), timeout=300)
             cfg = await get_guild_cfg(interaction.guild.id)
-            raw = cfg.get("templates") or {}
-            if isinstance(raw, str):
+            templates = cfg.get("templates") or {}
+            if isinstance(templates, str):
                 try:
-                    current_templates = json.loads(raw)
+                    templates = json.loads(templates)
                 except json.JSONDecodeError:
-                    current_templates = {}
-            else:
-                current_templates = dict(raw)
-            current_templates[module] = msg2.content
-            await update_guild_cfg(interaction.guild.id, templates=current_templates)
+                    templates = {}
+            templates[module] = msg2.content
+            await update_guild_cfg(interaction.guild.id, templates=templates)
 
-        return await reply_text(channel, f"🎉 **{module}**-Setup abgeschlossen!", kind="success")
+        return await reply_text(channel, f"🎉 {module}-Setup abgeschlossen!", kind="success")
 
-    #
-    # /disable — 1:1 Port von !disable, mit Embeds & Farben
-    #
+    # /disable – nur EIN Kanal optional
     @app_commands.command(name="disable", description="Deaktiviert ein Modul und entfernt zugehörige Daten")
     @require_manage_guild()
     @app_commands.describe(
         module="welcome | leave | vc_override | autorole | vc_track",
-        channels="(Optional) Kanäle für vc_override/vc_track (mehrere möglich)"
+        channel="Optional: nur für einen bestimmten Kanal (vc_override/vc_track)"
     )
-    async def disable(
-        self,
-        interaction: discord.Interaction,
-        module: str,
-        channels: List[discord.abc.GuildChannel] = None  # Hinweis: Slash-UI unterstützt evtl. nur einen Channel
-    ):
-        """
-        Deaktiviert ein Modul und entfernt alle zugehörigen Daten.
-        Usage:
-          • /disable module:welcome
-          • /disable module:leave
-          • /disable module:vc_override channels:[#Voice1 …]
-        """
-        module = (module or "").lower()
+    async def disable(self, interaction: discord.Interaction, module: str, channel: discord.abc.GuildChannel | None = None):
+        module = module.lower()
         allowed = ("welcome", "leave", "vc_override", "autorole", "vc_track")
         if module not in allowed:
-            return await reply_text(
-                interaction,
-                "❌ Unbekanntes Modul. Erlaubt: `welcome`, `leave`, `vc_override`, `autorole`, `vc_track`.",
-                kind="error"
-            )
+            return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
 
-        guild_id = interaction.guild.id
+        gid = interaction.guild.id
 
-        # autorole deaktivieren
         if module == "autorole":
-            await update_guild_cfg(guild_id, default_role=None)
-            return await reply_text(
-                interaction,
-                "🗑️ Modul **autorole** wurde deaktiviert. Keine Autorole mehr gesetzt.",
-                kind="success"
-            )
+            await update_guild_cfg(gid, default_role=None)
+            return await reply_text(interaction, "🗑️ Autorole deaktiviert.", kind="success")
 
-        # vc_track deaktivieren
         if module == "vc_track":
-            if channels:
-                removed = []
-                for ch in channels:
-                    if isinstance(ch, discord.VoiceChannel):
-                        await execute(
-                            "DELETE FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
-                            guild_id, ch.id
-                        )
-                        removed.append(ch.mention)
-                if removed:
-                    return await reply_text(
-                        interaction,
-                        f"🗑️ VC-Tracking entfernt für: {', '.join(removed)}",
-                        kind="success"
-                    )
-                return await reply_text(interaction, "ℹ️ Keine gültigen Voice-Channels angegeben.", kind="info")
-            else:
-                await execute("DELETE FROM vc_tracking WHERE guild_id=$1", guild_id)
-                return await reply_text(
-                    interaction,
-                    "🗑️ VC-Tracking für **alle** Voice-Channels entfernt.",
-                    kind="success"
-                )
+            if channel:
+                await execute("DELETE FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2", gid, channel.id)
+                return await reply_text(interaction, f"🗑️ VC-Tracking entfernt für {channel.mention}.", kind="success")
+            await execute("DELETE FROM vc_tracking WHERE guild_id=$1", gid)
+            return await reply_text(interaction, "🗑️ VC-Tracking für alle Kanäle entfernt.", kind="success")
 
-        # welcome & leave: Channel/Role/Template entfernen
         if module in ("welcome", "leave"):
-            cfg = await get_guild_cfg(guild_id)
+            cfg = await get_guild_cfg(gid)
             fields = {}
             if module == "welcome":
-                fields["welcome_channel"] = None
-                fields["welcome_role"]    = None
+                fields.update(welcome_channel=None, welcome_role=None)
             else:
-                fields["leave_channel"]   = None
-
-            tpl = (cfg.get("templates") or {}).copy()
-            if isinstance(tpl, str):
+                fields.update(leave_channel=None)
+            templates = cfg.get("templates") or {}
+            if isinstance(templates, str):
                 try:
-                    tpl = json.loads(tpl)
+                    templates = json.loads(templates)
                 except json.JSONDecodeError:
-                    tpl = {}
-            tpl.pop(module, None)
-            fields["templates"] = tpl
+                    templates = {}
+            templates.pop(module, None)
+            fields["templates"] = templates
+            await update_guild_cfg(gid, **fields)
+            return await reply_text(interaction, f"🗑️ {module} deaktiviert.", kind="success")
 
-            await update_guild_cfg(guild_id, **fields)
-            return await reply_text(
-                interaction,
-                f"🗑️ Modul **{module}** wurde deaktiviert und alle Einstellungen gelöscht.",
-                kind="success"
-            )
+        if module == "vc_override":
+            if channel:
+                await execute("DELETE FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2", gid, channel.id)
+                return await reply_text(interaction, f"🗑️ vc_override entfernt für {channel.mention}.", kind="success")
+            await execute("DELETE FROM vc_overrides WHERE guild_id=$1", gid)
+            return await reply_text(interaction, "🗑️ Alle vc_override-Einträge entfernt.", kind="success")
 
-        # vc_override
-        if channels:
-            removed = []
-            for ch in channels:
-                await execute(
-                    "DELETE FROM vc_overrides WHERE guild_id = $1 AND channel_id = $2",
-                    guild_id, ch.id
-                )
-                removed.append(ch.mention)
-            return await reply_text(
-                interaction,
-                f"🗑️ vc_override-Overrides für {', '.join(removed)} wurden entfernt.",
-                kind="success"
-            )
-
-        await execute("DELETE FROM vc_overrides WHERE guild_id = $1", guild_id)
-        return await reply_text(
-            interaction,
-            "🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.",
-            kind="success"
-        )
 
 async def setup(bot: commands.Bot):
     cog = AdminCog(bot)

@@ -1,34 +1,34 @@
 # bot/utils/checks.py
 from __future__ import annotations
-import functools
 import discord
 from discord import app_commands
 
-# ---- App-Command Checks (Slash) -------------------------------------------
-
 def require_manage_guild():
-    """Slash-Check: Nutzer braucht 'Server verwalten'."""
-    def predicate(inter: discord.Interaction) -> bool:
-        if inter.user is None or inter.guild is None:
-            return False
-        perms = inter.user.guild_permissions
-        return bool(perms.manage_guild or perms.administrator)
-    return app_commands.check(lambda inter: predicate(inter))
+    """Slash-Check: Nutzer braucht 'Server verwalten' oder Admin."""
+    return app_commands.check(
+        lambda inter: bool(
+            inter.guild
+            and inter.user
+            and (inter.user.guild_permissions.manage_guild or inter.user.guild_permissions.administrator)
+        )
+    )
 
 def require_manage_channels():
-    """Slash-Check: Nutzer braucht 'Kanäle verwalten'."""
-    def predicate(inter: discord.Interaction) -> bool:
-        if inter.user is None or inter.guild is None:
-            return False
-        perms = inter.user.guild_permissions
-        return bool(perms.manage_channels or perms.administrator)
-    return app_commands.check(lambda inter: predicate(inter))
+    """Slash-Check: Nutzer braucht 'Kanäle verwalten' oder Admin."""
+    return app_commands.check(
+        lambda inter: bool(
+            inter.guild
+            and inter.user
+            and (inter.user.guild_permissions.manage_channels or inter.user.guild_permissions.administrator)
+        )
+    )
 
 def require_manage_messages():
-    """Slash-Check: Nutzer braucht 'Nachrichten verwalten'."""
-    def predicate(inter: discord.Interaction) -> bool:
-        if inter.user is None or inter.guild is None:
-            return False
-        perms = inter.user.guild_permissions
-        return bool(perms.manage_messages or perms.administrator)
-    return app_commands.check(lambda inter: predicate(inter))
+    """Slash-Check: Nutzer braucht 'Nachrichten verwalten' oder Admin."""
+    return app_commands.check(
+        lambda inter: bool(
+            inter.guild
+            and inter.user
+            and (inter.user.guild_permissions.manage_messages or inter.user.guild_permissions.administrator)
+        )
+    )
