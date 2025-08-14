@@ -1,3 +1,4 @@
+# bot/db.py
 from typing import Optional
 import asyncpg
 from .config import settings
@@ -24,6 +25,7 @@ async def init_db():
           leave_channel   BIGINT,
           default_role    BIGINT,
           lang            TEXT,
+          vc_log_channel  BIGINT,                  -- <— hinzugefügt!
           templates       JSONB DEFAULT '{}'::jsonb
         );
         """)
@@ -55,6 +57,11 @@ async def fetchrow(*args, **kwargs):
     pool = await get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow(*args, **kwargs)
+
+async def fetch(*args, **kwargs):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(*args, **kwargs)
 
 async def execute(*args, **kwargs):
     pool = await get_pool()
