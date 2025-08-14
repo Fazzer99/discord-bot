@@ -12,13 +12,15 @@ EXTENSIONS = [
     "bot.cogs.admin",
     "bot.cogs.autorole",
     "bot.cogs.cleanup",
+    "bot.cogs.events",
+    "bot.cogs.feature",
     "bot.cogs.features",
     "bot.cogs.guild_join",
+    "bot.cogs.maintenance",
     "bot.cogs.moderation",
     "bot.cogs.vc_tracking_override",
     "bot.cogs.vc_tracking_simple",
     "bot.cogs.welcome_leave",
-    "bot.cogs.events",
 ]
 
 # Basic logging (Railway-Logs)
