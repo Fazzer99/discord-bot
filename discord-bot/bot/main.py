@@ -41,21 +41,15 @@ class FazzerBot(commands.Bot):
                 log.info(f"Cog geladen: {ext}")
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
-        
-        # Alte globale Commands säubern und frisch setzen
-        try:
-            self.tree.clear_commands(guild=None)      # globale Liste lokal leeren
-            await self.tree.sync(guild=None)          # leere Liste pushen (löscht alte)
-            # optional: testweise nur für 1 Guild registrieren (schneller sichtbar):
-            # TEST_GUILD_ID = 123456789012345678
-            # await self.tree.sync(guild=discord.Object(id=TEST_GUILD_ID))
-        except Exception as e:
-            log.exception(f"Command-Reset fehlgeschlagen: {e}")
 
-
-        # 3) Slash-Commands sync (global)
+        # 3) Slash-Commands synchronisieren
         try:
-            synced = await self.tree.sync()
+            # Optional: schneller Guild-Sync (nur für Testserver)
+            TEST_GUILD_ID = None  # z.B. 123456789012345678 oder None für global
+            if TEST_GUILD_ID:
+                synced = await self.tree.sync(guild=discord.Object(id=TEST_GUILD_ID))
+            else:
+                synced = await self.tree.sync()
             log.info(f"Slash-Commands synchronisiert ({len(synced)} Kommandos).")
         except Exception as e:
             log.exception(f"Slash-Command-Sync fehlgeschlagen: {e}")
@@ -63,7 +57,10 @@ class FazzerBot(commands.Bot):
         # 4) Presence setzen
         try:
             await self.change_presence(
-                activity=discord.Activity(type=discord.ActivityType.listening, name="/help • /features"),
+                activity=discord.Activity(
+                    type=discord.ActivityType.listening,
+                    name="/help • /features"
+                ),
                 status=discord.Status.online,
             )
         except Exception:
