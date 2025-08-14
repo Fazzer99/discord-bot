@@ -67,7 +67,8 @@ def run_bot():
     intents.message_content = True
     intents.members = True  # benötigt für Autorole/Welcome/Leave
 
-    bot = FazzerBot(command_prefix="!", intents=intents)
+bot = FazzerBot(command_prefix="!", intents=intents)
 
-    # Hinweis: Token muss in settings.discord_token liegen
-    bot.run(settings.discord_token)
+if not settings.token:
+    raise RuntimeError("DISCORD_TOKEN fehlt. Bitte in Railway unter Variables setzen.")
+bot.run(settings.token)
