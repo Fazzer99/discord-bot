@@ -13,7 +13,6 @@ EXTENSIONS = [
     "bot.cogs.autorole",
     "bot.cogs.cleanup",
     "bot.cogs.events",
-    "bot.cogs.feature",
     "bot.cogs.features",
     "bot.cogs.guild_join",
     "bot.cogs.maintenance",
