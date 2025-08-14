@@ -15,7 +15,6 @@ EXTENSIONS = [
     "bot.cogs.events",
     "bot.cogs.features",
     "bot.cogs.guild_join",
-    "bot.cogs.maintenance",
     "bot.cogs.moderation",
     "bot.cogs.vc_tracking_override",
     "bot.cogs.vc_tracking_simple",
