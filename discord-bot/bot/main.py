@@ -1,14 +1,13 @@
 # bot/main.py
 from __future__ import annotations
 import logging
-import asyncio
 import discord
 from discord.ext import commands
 
 from .config import settings
 from .db import init_db
 
-# <- Alle Cogs, die du aktuell im Projekt hast
+# Alle Cogs, die geladen werden sollen
 EXTENSIONS = [
     "bot.cogs.admin",
     "bot.cogs.autorole",
@@ -19,7 +18,7 @@ EXTENSIONS = [
     "bot.cogs.vc_tracking_override",
     "bot.cogs.vc_tracking_simple",
     "bot.cogs.welcome_leave",
-    "bot.cogs.events",  # dein AppCommand-Error-Handler etc.
+    "bot.cogs.events",
 ]
 
 # Basic logging (Railway-Logs)
@@ -63,12 +62,15 @@ class FazzerBot(commands.Bot):
         log.info(f"✅ Eingeloggt als {self.user} (ID: {self.user.id})")
 
 def run_bot():
+    # Intents
     intents = discord.Intents.default()
     intents.message_content = True
     intents.members = True  # benötigt für Autorole/Welcome/Leave
 
-bot = FazzerBot(command_prefix="!", intents=intents)
+    # Bot erstellen
+    bot = FazzerBot(command_prefix="!", intents=intents)
 
-if not settings.token:
-    raise RuntimeError("DISCORD_TOKEN fehlt. Bitte in Railway unter Variables setzen.")
-bot.run(settings.token)
+    # Token prüfen & starten
+    if not settings.token:
+        raise RuntimeError("DISCORD_TOKEN fehlt. Bitte in Railway unter Variables setzen.")
+    bot.run(settings.token)
