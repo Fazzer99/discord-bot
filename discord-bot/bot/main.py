@@ -70,7 +70,6 @@ class FazzerBot(commands.Bot):
             # sauber abbrechen -> wir fangen das gleich im Error-Handler ab
             raise app_commands.CheckFailure("Guild language not set")
 
-        from discord import app_commands
         for cmd in list(self.tree.get_commands()):
             # Nur AppCommands (Slash), CommandGroups enthalten ebenfalls .checks
             if isinstance(cmd, app_commands.Command):
