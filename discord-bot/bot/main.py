@@ -83,6 +83,47 @@ class FazzerBot(commands.Bot):
                     if sub.name != "setlang":
                         sub.checks.append(_lang_check)  # type: ignore[attr-defined]
 
+        from discord import app_commands
+        from .utils.replies import reply_text, reply_error  # falls noch nicht oben importiert
+
+        # 2c) Eigener Tree-Error-Handler -> unterdrückt das "Ignoring exception ..." Logging
+        async def _tree_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            # Sprach-Check & andere Checks: leise schlucken (Check hat schon ein Embed gesendet)
+            if isinstance(error, app_commands.CheckFailure):
+                return
+
+            # fehlende Rechte freundlich melden
+            if isinstance(error, app_commands.MissingPermissions):
+                try:
+                    await reply_error(interaction, "❌ Dir fehlen die nötigen Berechtigungen.", ephemeral=True)
+                except Exception:
+                    pass
+                return
+
+            # Cooldowns nett erklären (falls genutzt)
+            if isinstance(error, app_commands.CommandOnCooldown):
+                try:
+                    await reply_text(
+                        interaction,
+                        f"⏳ Bitte warte noch {error.retry_after:.1f} Sek., bevor du den Befehl erneut nutzt.",
+                        kind="warning",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+            # Fallback: kurz für User + ordentlich loggen
+            cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
+            log.exception(f"Slash-Command-Error in /{cmd_name}: {error}")
+            try:
+                await reply_error(interaction, "❌ Unerwarteter Fehler beim Ausführen des Befehls.", ephemeral=True)
+            except Exception:
+                pass
+
+        # Dem Tree zuweisen (macht das interne "Ignoring exception ..." stumm)
+        self.tree.on_error = _tree_error_handler
+
         # 3) Slash-Commands synchronisieren
         try:
             TEST_GUILD_ID = None  # z.B. 123456789012345678 für schnelleren Guild-Sync
