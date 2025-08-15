@@ -131,45 +131,67 @@ class AdminCog(commands.Cog):
                 kind="success"
             )
 
-        # ---------- vc_track ----------
+       # ---------- vc_track ----------
         if module == "vc_track":
             await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.", kind="info")
-            msg_chan = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
+            msg_chan = await self.bot.wait_for(
+                "message",
+                check=lambda m: check_msg(m, lambda x: x.channel_mentions),
+                timeout=60
+            )
             vc_channel = msg_chan.channel_mentions[0]
 
-            # darf nicht parallel vc_override sein
-            row = await fetchrow(
-                "SELECT 1 FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+            # ❌ darf NICHT parallel vc_override sein
+            row_override = await fetchrow(
+                "SELECT 1 FROM public.vc_overrides WHERE guild_id=$1 AND channel_id=$2",
                 interaction.guild.id, vc_channel.id
             )
-            if row:
+            if row_override:
                 return await reply_text(
                     channel,
-                    f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. "
-                    f"Bitte zuerst `/disable vc_override channel:{vc_channel.name}` ausführen oder anderen Kanal wählen.",
+                    (
+                        f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv.\n"
+                        f"Bitte zuerst `/disable module:vc_override channels:{vc_channel.name}` ausführen "
+                        f"oder einen anderen Kanal wählen."
+                    ),
                     kind="error"
                 )
 
+            # Log-Channel vorhanden?
             cfg = await get_guild_cfg(interaction.guild.id)
             if not cfg.get("vc_log_channel"):
                 await reply_text(channel, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).", kind="info")
-                msg_log = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
+                msg_log = await self.bot.wait_for(
+                    "message",
+                    check=lambda m: check_msg(m, lambda x: x.channel_mentions),
+                    timeout=60
+                )
                 log_ch = msg_log.channel_mentions[0]
                 await update_guild_cfg(interaction.guild.id, vc_log_channel=log_ch.id)
 
+            # Schon als vc_track eingetragen?
             exists = await fetchrow(
-                "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+                "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
                 interaction.guild.id, vc_channel.id
             )
             if exists:
-                return await reply_text(channel, f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.", kind="info")
+                return await reply_text(
+                    channel,
+                    f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.",
+                    kind="info"
+                )
 
-            # Deine Tabelle hat user_id NOT NULL -> Dummy 0 mitschreiben
+            # Eintragen (vereinfachtes Schema: NUR guild_id, channel_id)
             await execute(
-                "INSERT INTO vc_tracking (guild_id, channel_id, user_id) VALUES ($1, $2, 0)",
+                "INSERT INTO public.vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
                 interaction.guild.id, vc_channel.id
             )
-            return await reply_text(channel, f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.", kind="success")
+
+            return await reply_text(
+                channel,
+                f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.",
+                kind="success"
+            )
 
         # ---------- autorole ----------
         if module == "autorole":

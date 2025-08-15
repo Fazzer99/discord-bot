@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime
 from typing import Optional, Dict
 
-import json
 import discord
 from discord.ext import commands
 from zoneinfo import ZoneInfo
@@ -27,24 +26,15 @@ class VcTrackingSimpleCog(commands.Cog):
     """
     Simple VC-Tracking:
       - Start: sobald die erste (nicht-Bot) Person joint
-      - Stop: sobald der Channel leer ist (Bots werden ignoriert)
+      - Stop: sobald der Channel leer ist (Bots ignorieren)
       - Live-Embed im vc_log_channel (oder system_channel / DM-Fallback)
-      - KEIN Override nötig; läuft nur, wenn Channel in vc_tracking steht UND nicht in vc_overrides
+      - Läuft nur, wenn Channel in public.vc_tracking steht UND NICHT in public.vc_overrides
+      - Achtung: Tabelle public.vc_tracking hat NUR (guild_id, channel_id)
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         # Laufende Sessions pro Voice-Channel-ID
-        # {
-        #   'guild_id': int,
-        #   'channel_id': int,
-        #   'started_by_id': int,
-        #   'started_at': datetime,
-        #   'accum': {user_id: seconds},
-        #   'running': {user_id: datetime_start},
-        #   'message': discord.Message | None,
-        #   'task': asyncio.Task | None,
-        # }
         self.vc_live_sessions: Dict[int, Dict] = {}
 
     # ---------- RENDER / UPDATE ----------
@@ -85,7 +75,7 @@ class VcTrackingSimpleCog(commands.Cog):
         emb = make_embed(
             title=title,
             description=None,
-            kind="info",  # blurple
+            kind="info",
             fields=[]
         )
         if vc:
@@ -224,8 +214,8 @@ class VcTrackingSimpleCog(commands.Cog):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         """
         Simple Tracking feuert NUR, wenn:
-          - Channel in vc_tracking vorhanden ist UND
-          - derselbe Channel NICHT in vc_overrides konfiguriert ist.
+          - Channel in public.vc_tracking vorhanden ist UND
+          - derselbe Channel NICHT in public.vc_overrides konfiguriert ist.
         """
         joined = before.channel is None and after.channel is not None
         left   = before.channel is not None and after.channel is None
@@ -238,7 +228,7 @@ class VcTrackingSimpleCog(commands.Cog):
 
         # Kanal muss in vc_tracking stehen …
         row = await fetchrow(
-            "SELECT 1 AS x FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+            "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
             member.guild.id, vc.id
         )
         if not row:
@@ -246,7 +236,7 @@ class VcTrackingSimpleCog(commands.Cog):
 
         # … und darf KEIN vc_override haben (sonst übernimmt das Override-Cog)
         row_override = await fetchrow(
-            "SELECT 1 AS x FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+            "SELECT 1 FROM public.vc_overrides WHERE guild_id=$1 AND channel_id=$2",
             member.guild.id, vc.id
         )
         if row_override:
