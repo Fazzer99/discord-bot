@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 import discord
+from discord import app_commands   # <— WICHTIG: auf Modulebene importieren!
 from discord.ext import commands
 
 from .config import settings
@@ -42,7 +43,7 @@ class FazzerBot(commands.Bot):
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
 
-        # 2b) Sprach-Check an ALLE Slash-Commands hängen (kompatibel mit älteren d.py)
+        # 2b) Sprach-Check an ALLE Slash-Commands hängen
         async def _lang_check(interaction: discord.Interaction) -> bool:
             # DMs & /setlang immer erlauben
             if interaction.guild is None:
@@ -53,7 +54,6 @@ class FazzerBot(commands.Bot):
 
             from .services.guild_config import get_guild_cfg
             from .utils.replies import reply_text
-            from discord import app_commands
 
             cfg = await get_guild_cfg(interaction.guild.id)
             lang = (cfg.get("lang") or "").lower()
@@ -67,39 +67,31 @@ class FazzerBot(commands.Bot):
                 kind="warning",
                 ephemeral=True,
             )
-            # sauber abbrechen -> wir fangen das gleich im Error-Handler ab
+            # sauber abbrechen; der Tree-Error-Handler unterdrückt das Log
             raise app_commands.CheckFailure("Guild language not set")
 
+        # Checks an alle Commands anhängen
         for cmd in list(self.tree.get_commands()):
-            # Nur AppCommands (Slash), CommandGroups enthalten ebenfalls .checks
             if isinstance(cmd, app_commands.Command):
                 if cmd.name != "setlang":
-                    # d.py hält Checks in einer Liste; wir fügen unseren hinzu
                     cmd.checks.append(_lang_check)  # type: ignore[attr-defined]
             elif isinstance(cmd, app_commands.Group):
-                # Für Gruppen: auch deren Unterbefehle versehen
                 for sub in cmd.walk_commands():
                     if sub.name != "setlang":
                         sub.checks.append(_lang_check)  # type: ignore[attr-defined]
 
-        from discord import app_commands
-        from .utils.replies import reply_text, reply_error  # falls noch nicht oben importiert
+        # 2c) Tree-Error-Handler: keine „Ignoring exception …“ Logs mehr
+        from .utils.replies import reply_text, reply_error
 
-        # 2c) Eigener Tree-Error-Handler -> unterdrückt das "Ignoring exception ..." Logging
         async def _tree_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
-            # Sprach-Check & andere Checks: leise schlucken (Check hat schon ein Embed gesendet)
             if isinstance(error, app_commands.CheckFailure):
-                return
-
-            # fehlende Rechte freundlich melden
+                return  # Check hat bereits ein Embed gesendet
             if isinstance(error, app_commands.MissingPermissions):
                 try:
                     await reply_error(interaction, "❌ Dir fehlen die nötigen Berechtigungen.", ephemeral=True)
                 except Exception:
                     pass
                 return
-
-            # Cooldowns nett erklären (falls genutzt)
             if isinstance(error, app_commands.CommandOnCooldown):
                 try:
                     await reply_text(
@@ -112,7 +104,6 @@ class FazzerBot(commands.Bot):
                     pass
                 return
 
-            # Fallback: kurz für User + ordentlich loggen
             cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
             log.exception(f"Slash-Command-Error in /{cmd_name}: {error}")
             try:
@@ -120,7 +111,6 @@ class FazzerBot(commands.Bot):
             except Exception:
                 pass
 
-        # Dem Tree zuweisen (macht das interne "Ignoring exception ..." stumm)
         self.tree.on_error = _tree_error_handler
 
         # 3) Slash-Commands synchronisieren
