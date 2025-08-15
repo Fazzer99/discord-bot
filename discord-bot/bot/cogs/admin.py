@@ -10,9 +10,10 @@ from ..utils.checks import require_manage_guild
 from ..utils.replies import reply_text
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..db import execute, fetchrow
+from ..utils.checks import GuildLangGuard
 
 
-class AdminCog(commands.Cog):
+class AdminCog(GuildLangGuard, commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
