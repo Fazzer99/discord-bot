@@ -70,7 +70,14 @@ class AdminCog(commands.Cog):
         if module not in valid:
             return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
 
-        await interaction.response.defer()  # öffentlich
+        # Interaction sofort quittieren, damit kein „… denkt nach …“ bleibt
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "🧩 Setup gestartet. Ich stelle dir gleich ein paar Fragen in diesem Kanal. "
+                "Mit `abbrechen` oder nach Timeout kannst du einfach neu mit `/setup` starten.",
+                ephemeral=True,
+            )
+
         author = interaction.user
         channel = interaction.channel
 
