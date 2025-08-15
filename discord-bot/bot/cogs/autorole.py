@@ -11,7 +11,7 @@ from ..utils.checks import require_manage_guild
 class AutoroleCog(commands.Cog):
     """
     Autorole:
-      - on_member_join: weist automatisch die in guild_settings.default_role gespeicherte Rolle zu
+      - on_member_join: weist automatisch die in guild_settings.default_role gespeicherte Rolle zu (ohne Chat-Ausgabe)
       - /set_autorole <role>: setzt die Auto-Rolle
       - /clear_autorole: deaktiviert Autorole
       - /autorole: zeigt die aktuelle Einstellung
@@ -20,7 +20,7 @@ class AutoroleCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # --- Event: neuen Mitgliedern automatisch die konfigurierte Rolle geben ---
+    # --- Event: neuen Mitgliedern automatisch die konfigurierte Rolle geben (silent) ---
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         cfg = await get_guild_cfg(member.guild.id)
@@ -35,20 +35,8 @@ class AutoroleCog(commands.Cog):
         try:
             await member.add_roles(role, reason="Autorole Setup")
         except discord.Forbidden:
-            system_channel = member.guild.system_channel
-            if system_channel:
-                await reply_error(
-                    system_channel,
-                    f"❗️ Kann Rolle <@&{role_id}> nicht zuweisen – fehlende Berechtigungen."
-                )
+            # Keine Channel-Nachricht mehr – nur Log, damit dein Welcome-Feature allein spricht
             print(f"[Autorole] ❗️ Keine Berechtigung für Rolle {role_id} in Guild {member.guild.id}")
-        else:
-            system_channel = member.guild.system_channel
-            if system_channel:
-                await reply_success(
-                    system_channel,
-                    f"👋 Willkommen {member.mention}! Du hast automatisch die Rolle **{role.name}** erhalten."
-                )
 
     # --- Slash: /set_autorole -------------------------------------------------
     @app_commands.command(
