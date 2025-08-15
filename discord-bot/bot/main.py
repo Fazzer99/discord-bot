@@ -53,6 +53,8 @@ class FazzerBot(commands.Bot):
 
             from .services.guild_config import get_guild_cfg
             from .utils.replies import reply_text
+            from discord import app_commands
+
             cfg = await get_guild_cfg(interaction.guild.id)
             lang = (cfg.get("lang") or "").lower()
             if lang in ("de", "en"):
@@ -65,8 +67,8 @@ class FazzerBot(commands.Bot):
                 kind="warning",
                 ephemeral=True,
             )
-            # Check must return False (oder Exception werfen). False genügt hier:
-            return False
+            # sauber abbrechen -> wir fangen das gleich im Error-Handler ab
+            raise app_commands.CheckFailure("Guild language not set")
 
         from discord import app_commands
         for cmd in list(self.tree.get_commands()):
