@@ -131,45 +131,76 @@ class AdminCog(commands.Cog):
                 kind="success"
             )
 
-       # ---------- vc_track ----------
+        # ---------- vc_track ----------
         if module == "vc_track":
-            await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.", kind="info")
-            msg_chan = await self.bot.wait_for(
-                "message",
-                check=lambda m: check_msg(m, lambda x: x.channel_mentions),
-                timeout=60
-            )
-            vc_channel = msg_chan.channel_mentions[0]
+            # Hilfs-Checks für die folgenden wait_for-Prompts
+            def same_author_same_channel(m: discord.Message) -> bool:
+                return (m.author == author) and (m.channel == channel)
 
-            # ❌ darf NICHT parallel vc_override sein
-            row_override = await fetchrow(
+            async def ask_voice_channel() -> discord.VoiceChannel:
+                await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, den du tracken möchtest.", kind="info")
+                def _check(m: discord.Message): return same_author_same_channel(m) and m.channel_mentions
+                msg = await self.bot.wait_for("message", check=_check, timeout=60)
+                vc = msg.channel_mentions[0]
+                if not isinstance(vc, discord.VoiceChannel):
+                    raise app_commands.AppCommandError("Kein Sprachkanal erwähnt.")
+                return vc
+
+            async def ask_log_channel(prompt: str) -> discord.TextChannel:
+                await reply_text(channel, prompt, kind="info")
+                def _check(m: discord.Message): return same_author_same_channel(m) and m.channel_mentions
+                msg = await self.bot.wait_for("message", check=_check, timeout=60)
+                tc = msg.channel_mentions[0]
+                if not isinstance(tc, discord.TextChannel):
+                    raise app_commands.AppCommandError("Kein Textkanal erwähnt.")
+                return tc
+
+            # 1) Sprachkanal abfragen
+            vc_channel = await ask_voice_channel()
+
+            # 2) darf NICHT parallel vc_override sein
+            exists_override = await fetchrow(
                 "SELECT 1 FROM public.vc_overrides WHERE guild_id=$1 AND channel_id=$2",
                 interaction.guild.id, vc_channel.id
             )
-            if row_override:
+            if exists_override:
                 return await reply_text(
                     channel,
-                    (
-                        f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv.\n"
-                        f"Bitte zuerst `/disable module:vc_override channels:{vc_channel.name}` ausführen "
-                        f"oder einen anderen Kanal wählen."
-                    ),
+                    f"❌ Für {vc_channel.mention} ist bereits **vc_override** aktiv. "
+                    f"Bitte zuerst `/disable module:vc_override channels:{vc_channel.name}` ausführen oder einen anderen Kanal wählen.",
                     kind="error"
                 )
 
-            # Log-Channel vorhanden?
+            # 3) Log-Kanal **immer** abfragen (mit ‚behalten/ändern‘, wenn vorhanden)
             cfg = await get_guild_cfg(interaction.guild.id)
-            if not cfg.get("vc_log_channel"):
-                await reply_text(channel, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).", kind="info")
-                msg_log = await self.bot.wait_for(
-                    "message",
-                    check=lambda m: check_msg(m, lambda x: x.channel_mentions),
-                    timeout=60
-                )
-                log_ch = msg_log.channel_mentions[0]
-                await update_guild_cfg(interaction.guild.id, vc_log_channel=log_ch.id)
+            current_log_id = cfg.get("vc_log_channel")
+            current_log_ch = interaction.guild.get_channel(current_log_id) if current_log_id else None
 
-            # Schon als vc_track eingetragen?
+            if current_log_ch and isinstance(current_log_ch, discord.TextChannel):
+                # Nutzer fragen, ob beibehalten werden soll
+                await reply_text(
+                    channel,
+                    f"ℹ️ Aktueller Log-Kanal ist {current_log_ch.mention}. "
+                    f"Möchtest du **diesen** weiter verwenden? Antworte mit `ja` oder `nein`.",
+                    kind="info"
+                )
+                def _check_keep(m: discord.Message):
+                    return same_author_same_channel(m) and m.content.lower().strip() in {"ja","j","yes","y","nein","n","no"}
+                msg_keep = await self.bot.wait_for("message", check=_check_keep, timeout=45)
+                keep = msg_keep.content.lower().strip() in {"ja","j","yes","y"}
+                if not keep:
+                    new_log = await ask_log_channel("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+                    await update_guild_cfg(interaction.guild.id, vc_log_channel=new_log.id)
+                    log_ch = new_log
+                else:
+                    log_ch = current_log_ch
+            else:
+                # Keiner gesetzt/auffindbar → zwingend abfragen
+                new_log = await ask_log_channel("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+                await update_guild_cfg(interaction.guild.id, vc_log_channel=new_log.id)
+                log_ch = new_log
+
+            # 4) Bereits aktiv?
             exists = await fetchrow(
                 "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
                 interaction.guild.id, vc_channel.id
@@ -177,11 +208,12 @@ class AdminCog(commands.Cog):
             if exists:
                 return await reply_text(
                     channel,
-                    f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv.",
+                    f"ℹ️ **VC-Tracking** ist für {vc_channel.mention} bereits aktiv. "
+                    f"(Log-Kanal: {log_ch.mention})",
                     kind="info"
                 )
 
-            # Eintragen (vereinfachtes Schema: NUR guild_id, channel_id)
+            # 5) Aktivieren (vereinfachte Tabelle ohne user_id)
             await execute(
                 "INSERT INTO public.vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
                 interaction.guild.id, vc_channel.id
@@ -189,7 +221,8 @@ class AdminCog(commands.Cog):
 
             return await reply_text(
                 channel,
-                f"🎉 **vc_track**-Setup abgeschlossen für {vc_channel.mention}.",
+                f"🎉 **vc_track** aktiviert für {vc_channel.mention}.\n"
+                f"🧾 Live-Logs gehen nach {log_ch.mention}.",
                 kind="success"
             )
 
