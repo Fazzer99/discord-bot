@@ -2,28 +2,79 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+from typing import List
 
-FEATURES_FILE = Path(__file__).resolve().parents[2] / "data" / "features.json"
+# Lokaler Pfad zur Datei im Repo:
+#   discord-bot/data/features.json
+FEATURES_FILE: Path = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
-def load_features():
+# (Optional) Relativer Pfad IM REPO – nützlich für Logs/Debug
+PATH_IN_REPO: str = "discord-bot/data/features.json"
+
+
+def _normalize(features: list) -> List[List[str]]:
     """
-    Gibt Liste[List[str,str]] zurück: [[name, desc], ...]
+    Defensive Normalisierung: Erlaube nur Sequenzen mit mind. 2 Einträgen,
+    wandle alles in [name:str, desc:str] um.
     """
-    if FEATURES_FILE.exists():
-        with open(FEATURES_FILE, "r", encoding="utf-8") as f:
-            try:
-                data = json.load(f)
-                # defensive: nur erlaubte Formen durchlassen
-                out = []
-                for item in data:
-                    if isinstance(item, (list, tuple)) and len(item) >= 2:
-                        out.append([str(item[0]), str(item[1])])
-                return out
-            except Exception:
-                return []
-    return []
+    out: List[List[str]] = []
+    for item in features or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            out.append([str(item[0]), str(item[1])])
+    return out
 
-def save_features(features):
+
+def load_features() -> List[List[str]]:
+    """
+    Lädt die Features-Liste aus FEATURES_FILE.
+    Rückgabeformat: [[name, desc], ...]
+    """
+    if not FEATURES_FILE.exists():
+        return []
+    try:
+        data = json.loads(FEATURES_FILE.read_text(encoding="utf-8"))
+        return _normalize(data)
+    except Exception:
+        # Korrupt/leer → leere Liste zurück
+        return []
+
+
+def save_features(features: List[List[str]]) -> None:
+    """
+    Speichert die Feature-Liste.
+    Erwartet bereits normalisierte Struktur [[name, desc], ...].
+    """
     FEATURES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(FEATURES_FILE, "w", encoding="utf-8") as f:
-        json.dump(features, f, ensure_ascii=False, indent=4)
+    FEATURES_FILE.write_text(
+        json.dumps(_normalize(features), ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+
+
+# Bequeme Helfer (optional, aber praktisch)
+
+def add_feature(name: str, description: str) -> List[List[str]]:
+    """
+    Fügt ein Feature hinzu (falls Name noch nicht existiert, case-insensitive).
+    Gibt die aktuelle Liste zurück.
+    """
+    features = load_features()
+    lower = name.strip().lower()
+    if not any(f[0].strip().lower() == lower for f in features):
+        features.append([name.strip(), description])
+        save_features(features)
+    return features
+
+
+def remove_feature(name: str) -> List[List[str]]:
+    """
+    Entfernt ein Feature per Name (case-insensitive).
+    Gibt die aktuelle Liste zurück.
+    """
+    features = load_features()
+    lower = name.strip().lower()
+    new_list = [f for f in features if f[0].strip().lower() != lower]
+    if len(new_list) != len(features):
+        save_features(new_list)
+        return new_list
+    return features
