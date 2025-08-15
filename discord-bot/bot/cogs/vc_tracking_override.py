@@ -13,6 +13,7 @@ from ..services.guild_config import get_guild_cfg
 from ..services.translation import translate_text_for_guild
 from ..utils.replies import make_embed
 from ..db import fetchrow
+from ..utils.checks import GuildLangGuard
 
 # Laufende Sessions pro Voice-Channel
 # Struktur pro VC-ID:
@@ -222,7 +223,7 @@ async def _handle_leave(member: discord.Member, vc: discord.VoiceChannel, overri
 
     vc_live_sessions.pop(sid, None)
 
-class VCTrackingOverrideCog(commands.Cog):
+class VcTrackingOverrideCog(GuildLangGuard, commands.Cog):
     def __init__(self, bot_: commands.Bot):
         global bot
         bot = bot_

@@ -13,6 +13,7 @@ from ..services.guild_config import get_guild_cfg
 from ..services.translation import translate_text_for_guild
 from ..utils.replies import make_embed
 from ..db import fetchrow
+from ..utils.checks import GuildLangGuard
 
 def _fmt_dur(total_seconds: int) -> str:
     h = total_seconds // 3600
@@ -23,7 +24,7 @@ def _fmt_dur(total_seconds: int) -> str:
 def _now() -> datetime:
     return datetime.now(tz=ZoneInfo("Europe/Berlin"))
 
-class VCTrackingSimpleCog(commands.Cog):
+class VCTrackingSimpleCog(GuildLangGuard, commands.Cog):
     """
     Simple VC-Tracking:
       - Start: sobald die erste (nicht-Bot) Person joint

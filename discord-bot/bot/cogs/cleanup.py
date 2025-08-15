@@ -9,7 +9,7 @@ from discord.ext import commands
 from ..utils.checks import require_manage_messages
 from ..utils.replies import reply_text
 from ..services.translation import translate_text_for_guild
-from ..utils.checks import GuildLangGuard
+from ..utils.checks import require_manage_messages, GuildLangGuard
 
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
