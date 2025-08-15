@@ -5,13 +5,15 @@ from datetime import datetime
 from typing import Optional, Dict
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from zoneinfo import ZoneInfo
 
-from ..services.guild_config import get_guild_cfg
+from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..services.translation import translate_text_for_guild
-from ..utils.replies import make_embed
-from ..db import fetchrow
+from ..utils.replies import make_embed, reply_text, reply_success, reply_error
+from ..utils.checks import require_manage_guild
+from ..db import fetchrow, fetch, execute
 
 def _fmt_dur(total_seconds: int) -> str:
     h = total_seconds // 3600
@@ -36,6 +38,134 @@ class VcTrackingSimpleCog(commands.Cog):
         self.bot = bot
         # Laufende Sessions pro Voice-Channel-ID
         self.vc_live_sessions: Dict[int, Dict] = {}
+
+    # ---------- Slash-Commands (neu) ----------
+
+    @app_commands.command(
+        name="set_vc_tracking",
+        description="Aktiviere einfaches VC-Tracking für einen Sprachkanal (optional: Log-Kanal setzen)."
+    )
+    @require_manage_guild()
+    @app_commands.describe(
+        channel="Sprachkanal, der getrackt werden soll",
+        log_channel="(Optional) Textkanal für Live-Logs; wenn leer, wird der bestehende genutzt"
+    )
+    async def set_vc_tracking(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.VoiceChannel,
+        log_channel: Optional[discord.TextChannel] = None,
+    ):
+        gid = interaction.guild.id
+
+        # 1) darf NICHT parallel vc_override sein
+        exists_override = await fetchrow(
+            "SELECT 1 FROM public.vc_overrides WHERE guild_id=$1 AND channel_id=$2",
+            gid, channel.id
+        )
+        if exists_override:
+            return await reply_error(
+                interaction,
+                f"❌ Für {channel.mention} ist bereits **vc_override** aktiv. "
+                f"Bitte zuerst `/disable module:vc_override channel:{channel.name}` ausführen oder einen anderen Kanal wählen."
+            )
+
+        # 2) Log-Kanal-Handling
+        cfg = await get_guild_cfg(gid)
+        current_log_id = cfg.get("vc_log_channel")
+        current_log_ch = interaction.guild.get_channel(current_log_id) if current_log_id else None
+
+        # Wenn Parameter gesetzt → überschreiben
+        final_log_ch: Optional[discord.TextChannel] = None
+        if log_channel is not None:
+            final_log_ch = log_channel
+            await update_guild_cfg(gid, vc_log_channel=log_channel.id)
+        else:
+            # Kein Parameter: vorhandenen nutzen, sonst Fehlermeldung
+            if isinstance(current_log_ch, discord.TextChannel):
+                final_log_ch = current_log_ch
+            else:
+                return await reply_error(
+                    interaction,
+                    "❌ Es ist kein Log-Kanal gesetzt. Bitte gib `log_channel` an oder setze ihn vorher (z. B. einmalig bei einem anderen Setup)."
+                )
+
+        # 3) Bereits aktiv?
+        exists = await fetchrow(
+            "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+            gid, channel.id
+        )
+        if exists:
+            return await reply_text(
+                interaction,
+                f"ℹ️ **VC-Tracking** ist für {channel.mention} bereits aktiv. (Log-Kanal: {final_log_ch.mention})",
+                kind="info",
+            )
+
+        # 4) Aktivieren
+        await execute(
+            "INSERT INTO public.vc_tracking (guild_id, channel_id) VALUES ($1, $2)",
+            gid, channel.id
+        )
+
+        return await reply_success(
+            interaction,
+            f"🎉 **vc_track** aktiviert für {channel.mention}.\n"
+            f"🧾 Live-Logs gehen nach {final_log_ch.mention}."
+        )
+
+    @app_commands.command(
+        name="vc_tracking",
+        description="Zeigt alle Kanäle mit einfachem VC-Tracking und den aktuellen Log-Kanal."
+    )
+    @require_manage_guild()
+    async def vc_tracking_status(self, interaction: discord.Interaction):
+        gid = interaction.guild.id
+
+        rows = await fetch(
+            """
+            SELECT channel_id
+              FROM public.vc_tracking
+             WHERE guild_id = $1
+             ORDER BY channel_id
+            """,
+            gid
+        )
+
+        cfg = await get_guild_cfg(gid)
+        log_id = cfg.get("vc_log_channel")
+        log_ch = interaction.guild.get_channel(log_id) if log_id else None
+
+        if not rows:
+            desc = (
+                f"**Log-Kanal:** {log_ch.mention if isinstance(log_ch, discord.TextChannel) else '—'}\n"
+                f"**Getrackte Sprachkanäle:** —"
+            )
+            emb = make_embed(title="🔧 VC-Tracking – Konfiguration", description=desc, kind="info", fields=[])
+            return await interaction.response.send_message(embed=emb, ephemeral=True)
+
+        # Embed mit Liste der Channels
+        emb = make_embed(
+            title="🔧 VC-Tracking – Konfiguration",
+            description=f"**Log-Kanal:** {log_ch.mention if isinstance(log_ch, discord.TextChannel) else '—'}",
+            kind="info",
+            fields=[]
+        )
+
+        # Discord: max. 25 Felder
+        added = 0
+        for r in rows:
+            if added >= 25:
+                break
+            ch = interaction.guild.get_channel(r["channel_id"])
+            ch_name = ch.mention if isinstance(ch, discord.VoiceChannel) else f"<#{r['channel_id']}>"
+            emb.add_field(name=ch_name, value="aktiv", inline=False)
+            added += 1
+
+        if added < len(rows):
+            emb.set_footer(text=f"… und {len(rows) - added} weitere Einträge.")
+
+        return await interaction.response.send_message(embed=emb, ephemeral=True)
 
     # ---------- RENDER / UPDATE ----------
 
@@ -169,7 +299,7 @@ class VcTrackingSimpleCog(commands.Cog):
 
         t0 = sess["running"].pop(member.id, None)
         if t0:
-            add = int((_now() - t0).total_seconds())
+            add = int((_now() - t0).total_seconds()))
             if add > 0:
                 sess["accum"][member.id] = sess["accum"].get(member.id, 0) + add
 
