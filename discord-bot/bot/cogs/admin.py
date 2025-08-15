@@ -79,55 +79,99 @@ class AdminCog(commands.Cog):
 
         # ---------- vc_override ----------
         if module == "vc_override":
-            await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**.", kind="info")
-            try:
-                msg_chan = await self.bot.wait_for(
-                    "message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60
-                )
-            except asyncio.TimeoutError:
-                return await reply_text(channel, "⏰ Zeit abgelaufen. Bitte `/setup vc_override` neu ausführen.", kind="warning")
-            vc_channel = msg_chan.channel_mentions[0]
+            # kleine Hilfsfunktionen für Prompts
+            def same_author_same_channel(m: discord.Message) -> bool:
+                return (m.author == author) and (m.channel == channel)
 
-            # darf nicht parallel vc_track sein
+            async def ask_voice_channel() -> discord.VoiceChannel:
+                await reply_text(channel, "❓ Bitte erwähne den **Sprachkanal**, für den das Override gelten soll.", kind="info")
+                def _check(m: discord.Message): return same_author_same_channel(m) and m.channel_mentions
+                msg = await self.bot.wait_for("message", check=_check, timeout=60)
+                vc = msg.channel_mentions[0]
+                if not isinstance(vc, discord.VoiceChannel):
+                    raise app_commands.AppCommandError("Kein Sprachkanal erwähnt.")
+                return vc
+
+            async def ask_roles(prompt: str) -> list[int]:
+                await reply_text(channel, prompt, kind="info")
+                def _check(m: discord.Message): return same_author_same_channel(m) and m.role_mentions
+                msg = await self.bot.wait_for("message", check=_check, timeout=60)
+                return [r.id for r in msg.role_mentions]
+
+            async def ask_log_channel(prompt: str) -> discord.TextChannel:
+                await reply_text(channel, prompt, kind="info")
+                def _check(m: discord.Message): return same_author_same_channel(m) and m.channel_mentions
+                msg = await self.bot.wait_for("message", check=_check, timeout=60)
+                tc = msg.channel_mentions[0]
+                if not isinstance(tc, discord.TextChannel):
+                    raise app_commands.AppCommandError("Kein Textkanal erwähnt.")
+                return tc
+
+            # 1) Sprachkanal abfragen
+            vc_channel = await ask_voice_channel()
+
+            # 2) Darf nicht parallel vc_track sein
             row = await fetchrow(
-                "SELECT 1 FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2",
+                "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
                 interaction.guild.id, vc_channel.id
             )
             if row:
                 return await reply_text(
                     channel,
                     f"❌ Für {vc_channel.mention} ist bereits **vc_track** aktiv. "
-                    f"Bitte zuerst `/disable vc_track channel:{vc_channel.name}` ausführen oder anderen Kanal wählen.",
+                    f"Bitte zuerst `/disable module:vc_track channels:{vc_channel.name}` ausführen oder einen anderen Kanal wählen.",
                     kind="error"
                 )
 
-            await reply_text(channel, "❓ Bitte erwähne **Override-Rollen** (z. B. `@Admin @Moderator`).", kind="info")
-            msg_o = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
-            override_ids = [r.id for r in msg_o.role_mentions]
+            # 3) Override- und Zielrollen
+            override_ids = await ask_roles("❓ Bitte erwähne **Override-Rollen** (z. B. `@Admin @Moderator`).")
+            target_ids   = await ask_roles("❓ Bitte erwähne **Ziel-Rollen**, die automatisch Zugriff erhalten sollen.")
 
-            await reply_text(channel, "❓ Bitte erwähne **Ziel-Rollen**, die Zugriff erhalten sollen.", kind="info")
-            msg_t = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.role_mentions), timeout=60)
-            target_ids = [r.id for r in msg_t.role_mentions]
+            # 4) Log-Kanal immer abfragen (behalten/ändern falls vorhanden)
+            cfg = await get_guild_cfg(interaction.guild.id)
+            current_log_id = cfg.get("vc_log_channel")
+            current_log_ch = interaction.guild.get_channel(current_log_id) if current_log_id else None
 
-            await reply_text(channel, "❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).", kind="info")
-            msg_log = await self.bot.wait_for("message", check=lambda m: check_msg(m, lambda x: x.channel_mentions), timeout=60)
-            vc_log_channel = msg_log.channel_mentions[0]
-            await update_guild_cfg(interaction.guild.id, vc_log_channel=vc_log_channel.id)
+            if current_log_ch and isinstance(current_log_ch, discord.TextChannel):
+                await reply_text(
+                    channel,
+                    f"ℹ️ Aktueller Log-Kanal ist {current_log_ch.mention}. "
+                    f"Möchtest du **diesen** weiter verwenden? Antworte mit `ja` oder `nein`.",
+                    kind="info"
+                )
+                def _check_keep(m: discord.Message):
+                    return same_author_same_channel(m) and m.content.lower().strip() in {"ja","j","yes","y","nein","n","no"}
+                msg_keep = await self.bot.wait_for("message", check=_check_keep, timeout=45)
+                keep = msg_keep.content.lower().strip() in {"ja","j","yes","y"}
+                if not keep:
+                    log_ch = await ask_log_channel("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+                    await update_guild_cfg(interaction.guild.id, vc_log_channel=log_ch.id)
+                else:
+                    log_ch = current_log_ch
+            else:
+                log_ch = await ask_log_channel("❓ Bitte erwähne den **Kanal für Live-VC-Logs** (z. B. `#modlogs`).")
+                await update_guild_cfg(interaction.guild.id, vc_log_channel=log_ch.id)
 
+            # 5) Speichern/Upsert
             await execute(
                 """
-                INSERT INTO vc_overrides (guild_id, channel_id, override_roles, target_roles)
+                INSERT INTO public.vc_overrides (guild_id, channel_id, override_roles, target_roles)
                 VALUES ($1, $2, $3::jsonb, $4::jsonb)
                 ON CONFLICT (guild_id, channel_id) DO UPDATE
-                  SET override_roles = EXCLUDED.override_roles,
-                      target_roles   = EXCLUDED.target_roles
+                SET override_roles = EXCLUDED.override_roles,
+                    target_roles   = EXCLUDED.target_roles
                 """,
-                interaction.guild.id, vc_channel.id,
-                json.dumps(override_ids), json.dumps(target_ids)
+                interaction.guild.id,
+                vc_channel.id,
+                json.dumps(override_ids),
+                json.dumps(target_ids),
             )
+
             return await reply_text(
                 channel,
-                f"🎉 **vc_override**-Setup abgeschlossen für {vc_channel.mention}.",
+                f"🎉 **vc_override** aktiviert für {vc_channel.mention}.\n"
+                f"🔐 Override-Rollen gesetzt und Ziel-Rollen hinterlegt.\n"
+                f"🧾 Live-Logs gehen nach {log_ch.mention}.",
                 kind="success"
             )
 
