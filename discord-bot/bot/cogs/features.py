@@ -7,7 +7,6 @@ from pathlib import Path
 from ..utils.replies import send_embed, reply_text
 from ..services.git_features import commit_features_json
 from ..config import settings
-from ..utils.checks import GuildLangGuard
 
 FEATURES_PATH = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
@@ -22,7 +21,7 @@ def load_features() -> list[tuple[str, str]]:
 def save_features(features: list[tuple[str, str]]):
     FEATURES_PATH.write_text(json.dumps(features, ensure_ascii=False, indent=2), encoding="utf-8")
 
-class FeaturesCog(GuildLangGuard, commands.Cog):
+class FeaturesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 

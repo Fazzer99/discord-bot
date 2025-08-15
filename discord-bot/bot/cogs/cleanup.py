@@ -9,7 +9,7 @@ from discord.ext import commands
 from ..utils.checks import require_manage_messages
 from ..utils.replies import reply_text
 from ..services.translation import translate_text_for_guild
-from ..utils.checks import require_manage_messages, GuildLangGuard
+from ..utils.checks import require_manage_messages
 
 cleanup_tasks: dict[int, asyncio.Task] = {}
 
@@ -37,7 +37,7 @@ async def _purge_all(channel: discord.TextChannel):
             await m.delete()
             await asyncio.sleep(1)
 
-class CleanupCog(GuildLangGuard, commands.Cog):
+class CleanupCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 

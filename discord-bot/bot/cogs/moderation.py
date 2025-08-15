@@ -10,11 +10,11 @@ from ..utils.checks import require_manage_channels
 from ..utils.replies import reply_text
 from ..services.guild_config import get_guild_cfg
 from ..services.translation import translate_text_for_guild
-from ..utils.checks import require_manage_channels, GuildLangGuard
+from ..utils.checks import require_manage_channels
 
 lock_tasks: dict[int, asyncio.Task] = {}
 
-class ModerationCog(GuildLangGuard, commands.Cog):
+class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 

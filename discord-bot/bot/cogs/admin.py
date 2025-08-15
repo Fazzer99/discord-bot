@@ -10,10 +10,9 @@ from ..utils.checks import require_manage_guild
 from ..utils.replies import reply_text
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..db import execute, fetchrow
-from ..utils.checks import GuildLangGuard
+from ..utils.checks import require_manage_guild
 
-
-class AdminCog(GuildLangGuard, commands.Cog):
+class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -64,7 +63,6 @@ class AdminCog(GuildLangGuard, commands.Cog):
         description="Interaktives Setup: welcome, leave, vc_override, autorole, vc_track"
     )
     @require_manage_guild()
-    @app_commands.check(ensure_lang_set)  # <-- Sprach-Check hier anhängen
     @app_commands.describe(module="welcome | leave | vc_override | autorole | vc_track")
     async def setup(self, interaction: discord.Interaction, module: str):
         module = (module or "").lower()
@@ -220,7 +218,6 @@ class AdminCog(GuildLangGuard, commands.Cog):
     # ---------------------------------------------------------------------
     @app_commands.command(name="disable", description="Deaktiviert ein Modul und entfernt zugehörige Daten")
     @require_manage_guild()
-    @app_commands.check(ensure_lang_set)  # <-- Sprach-Check auch hier
     @app_commands.describe(
         module="welcome | leave | vc_override | autorole | vc_track",
         channel="Optional: nur für einen bestimmten Kanal (bei vc_override/vc_track)"
