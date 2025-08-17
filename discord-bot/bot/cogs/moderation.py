@@ -78,6 +78,11 @@ class ModerationCog(commands.Cog):
         channel3: Optional[discord.abc.GuildChannel] = None,
         channel4: Optional[discord.abc.GuildChannel] = None,
         channel5: Optional[discord.abc.GuildChannel] = None,
+        channel6: Optional[discord.abc.GuildChannel] = None,
+        channel7: Optional[discord.abc.GuildChannel] = None,
+        channel8: Optional[discord.abc.GuildChannel] = None,
+        channel9: Optional[discord.abc.GuildChannel] = None,
+        channel10: Optional[discord.abc.GuildChannel] = None,
     ):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
@@ -97,7 +102,7 @@ class ModerationCog(commands.Cog):
             )
 
         # Alle eingegebenen Kanäle einsammeln und säubern
-        raw_channels = [channel, channel2, channel3, channel4, channel5]
+        raw_channels = [channel, channel2, channel3, channel4, channel5, channel6, channel7, channel8, channel9, channel10]
         sel: list[discord.TextChannel | discord.VoiceChannel] = []
         seen: set[int] = set()
         for ch in raw_channels:
@@ -246,11 +251,16 @@ class ModerationCog(commands.Cog):
         channel3: Optional[discord.abc.GuildChannel] = None,
         channel4: Optional[discord.abc.GuildChannel] = None,
         channel5: Optional[discord.abc.GuildChannel] = None,
+        channel6: Optional[discord.abc.GuildChannel] = None,
+        channel7: Optional[discord.abc.GuildChannel] = None,
+        channel8: Optional[discord.abc.GuildChannel] = None,
+        channel9: Optional[discord.abc.GuildChannel] = None,
+        channel10: Optional[discord.abc.GuildChannel] = None,
     ):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        raw_channels = [channel, channel2, channel3, channel4, channel5]
+        raw_channels = [channel, channel2, channel3, channel4, channel5, channel6, channel7, channel8, channel9, channel10]
         targets: list[discord.TextChannel | discord.VoiceChannel] = []
         seen: set[int] = set()
         for ch in raw_channels:
