@@ -2,7 +2,7 @@
 from __future__ import annotations
 import logging
 import discord
-from discord import app_commands   # <— WICHTIG: auf Modulebene importieren!
+from discord import app_commands   # <— wichtig: auf Modulebene
 from discord.ext import commands
 
 from .config import settings
@@ -26,6 +26,7 @@ EXTENSIONS = [
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("discord-bot")
 
+
 class FazzerBot(commands.Bot):
     async def setup_hook(self):
         # 1) DB initialisieren
@@ -42,6 +43,9 @@ class FazzerBot(commands.Bot):
                 log.info(f"Cog geladen: {ext}")
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
+
+        # 2a) Statische DE->EN Localizations für Slash-Commands anlegen
+        await self._apply_de_en_localizations()
 
         # 2b) Sprach-Check an ALLE Slash-Commands hängen
         async def _lang_check(interaction: discord.Interaction) -> bool:
@@ -136,8 +140,36 @@ class FazzerBot(commands.Bot):
         except Exception:
             pass
 
+    async def _apply_de_en_localizations(self):
+        """
+        Setzt für alle Slash-Commands & deren Optionen EN-Localizations
+        basierend auf deutschen Beschreibungen (DE=Default, EN=Fallback).
+        """
+        from .services.translation import de_to_en_static
+
+        async def localize_command(cmd: app_commands.Command):
+            # Command-Beschreibung
+            if getattr(cmd, "description", None):
+                en = await de_to_en_static(cmd.description)
+                cmd.description_localizations = {"en-US": en, "en-GB": en}
+
+            # Parameter-Beschreibungen
+            for param in getattr(cmd, "parameters", []):
+                desc = getattr(param, "description", None)
+                if desc:
+                    enp = await de_to_en_static(desc)
+                    param.description_localizations = {"en-US": enp, "en-GB": enp}
+
+        for root in list(self.tree.get_commands()):
+            if isinstance(root, app_commands.Group):
+                for sub in root.walk_commands():
+                    await localize_command(sub)
+            else:
+                await localize_command(root)
+
     async def on_ready(self):
         log.info(f"✅ Eingeloggt als {self.user} (ID: {self.user.id})")
+
 
 def run_bot():
     # Intents

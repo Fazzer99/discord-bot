@@ -11,8 +11,12 @@ from ..services.guild_config import get_guild_cfg
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
 DEEPL_KEY = os.getenv("DEEPL_API_KEY")
 
-# Cache: deutscher Text -> englischer Text
+# Cache: deutscher Text -> englischer Text (laufzeit-dynamisch, z.B. Embeds)
 _translation_cache: Dict[str, str] = {}
+
+# Separater Cache für "statische" Übersetzungen (Slash-Beschreibungen)
+_translation_cache_static: Dict[str, str] = {}
+
 
 async def translate_de_to_en(text_de: str) -> str:
     """Übersetzt DE->EN mit Cache & Timeouts. Fällt bei Fehlern auf Original zurück."""
@@ -44,6 +48,43 @@ async def translate_de_to_en(text_de: str) -> str:
     except Exception:
         return text_de
 
+
+async def de_to_en_static(text_de: str) -> str:
+    """
+    EINMALIGE DE->EN Übersetzung für statische Texte (Slash-Command-Beschreibungen).
+    Aggressiver Cache, DeepL optional. Fallback = DE.
+    """
+    if not text_de or not text_de.strip():
+        return text_de
+    if text_de in _translation_cache_static:
+        return _translation_cache_static[text_de]
+
+    if not DEEPL_KEY:
+        _translation_cache_static[text_de] = text_de
+        return text_de
+
+    payload = {
+        "auth_key": DEEPL_KEY,
+        "text": text_de,
+        "source_lang": "DE",
+        "target_lang": "EN",
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(DEEPL_API_URL, data=payload) as resp:
+                if resp.status != 200:
+                    _translation_cache_static[text_de] = text_de
+                    return text_de
+                data = await resp.json()
+                en = data["translations"][0]["text"]
+                _translation_cache_static[text_de] = en
+                return en
+    except Exception:
+        _translation_cache_static[text_de] = text_de
+        return text_de
+
+
 async def translate_text_for_guild(guild_id: Optional[int], text_de: str) -> str:
     """
     Gibt den Text ggf. auf Englisch zurück, wenn guild.lang == 'en'.
@@ -58,6 +99,7 @@ async def translate_text_for_guild(guild_id: Optional[int], text_de: str) -> str
     if lang == "en":
         return await translate_de_to_en(text_de)
     return text_de
+
 
 async def translate_embed_for_guild(guild_id: int, embed: discord.Embed) -> discord.Embed:
     """
