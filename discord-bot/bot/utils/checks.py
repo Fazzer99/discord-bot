@@ -6,43 +6,38 @@ from discord import app_commands
 # ----------------------------- Rechte-Checks -----------------------------
 
 def require_manage_guild():
-    """Slash-Check: Nutzer braucht 'Server verwalten' oder Admin."""
-    return app_commands.check(
-        lambda inter: bool(
-            inter.guild
-            and inter.user
-            and (
-                inter.user.guild_permissions.manage_guild
-                or inter.user.guild_permissions.administrator
-            )
-        )
-    )
+    """Slash-Check: Nutzer braucht 'Server verwalten' oder Admin. Wirft MissingPermissions bei Verstoß."""
+    def predicate(inter: discord.Interaction) -> bool:
+        if inter.guild is None:
+            # In DMs macht der Befehl keinen Sinn
+            raise app_commands.CheckFailure("Guild-only command")
+        perms = getattr(inter.user, "guild_permissions", None)
+        if not perms or not (perms.manage_guild or perms.administrator):
+            raise app_commands.MissingPermissions(["manage_guild"])
+        return True
+    return app_commands.check(predicate)
 
 def require_manage_channels():
-    """Slash-Check: Nutzer braucht 'Kanäle verwalten' oder Admin."""
-    return app_commands.check(
-        lambda inter: bool(
-            inter.guild
-            and inter.user
-            and (
-                inter.user.guild_permissions.manage_channels
-                or inter.user.guild_permissions.administrator
-            )
-        )
-    )
+    """Slash-Check: Nutzer braucht 'Kanäle verwalten' oder Admin. Wirft MissingPermissions bei Verstoß."""
+    def predicate(inter: discord.Interaction) -> bool:
+        if inter.guild is None:
+            raise app_commands.CheckFailure("Guild-only command")
+        perms = getattr(inter.user, "guild_permissions", None)
+        if not perms or not (perms.manage_channels or perms.administrator):
+            raise app_commands.MissingPermissions(["manage_channels"])
+        return True
+    return app_commands.check(predicate)
 
 def require_manage_messages():
-    """Slash-Check: Nutzer braucht 'Nachrichten verwalten' oder Admin."""
-    return app_commands.check(
-        lambda inter: bool(
-            inter.guild
-            and inter.user
-            and (
-                inter.user.guild_permissions.manage_messages
-                or inter.user.guild_permissions.administrator
-            )
-        )
-    )
+    """Slash-Check: Nutzer braucht 'Nachrichten verwalten' oder Admin. Wirft MissingPermissions bei Verstoß."""
+    def predicate(inter: discord.Interaction) -> bool:
+        if inter.guild is None:
+            raise app_commands.CheckFailure("Guild-only command")
+        perms = getattr(inter.user, "guild_permissions", None)
+        if not perms or not (perms.manage_messages or perms.administrator):
+            raise app_commands.MissingPermissions(["manage_messages"])
+        return True
+    return app_commands.check(predicate)
 
 # ------------------------ Globaler Sprach-Guard --------------------------
 

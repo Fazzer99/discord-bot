@@ -71,7 +71,7 @@ class FazzerBot(commands.Bot):
                 kind="warning",
                 ephemeral=True,
             )
-            # sauber abbrechen; der Tree-Error-Handler unterdrückt das Log
+            # sauber abbrechen; der Tree-Error-Handler antwortet ebenfalls freundlich
             raise app_commands.CheckFailure("Guild language not set")
 
         # Checks an alle Commands anhängen
@@ -84,18 +84,34 @@ class FazzerBot(commands.Bot):
                     if sub.name != "setlang":
                         sub.checks.append(_lang_check)  # type: ignore[attr-defined]
 
-        # 2c) Tree-Error-Handler: keine „Ignoring exception …“ Logs mehr
+        # 2c) Tree-Error-Handler: schickt IMMER eine freundliche Antwort
         from .utils.replies import reply_text, reply_error
 
         async def _tree_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            # Fehlende Voraussetzungen/Checks
             if isinstance(error, app_commands.CheckFailure):
-                return  # Check hat bereits ein Embed gesendet
+                try:
+                    msg = "❌ Dir fehlen die nötigen Berechtigungen oder Voraussetzungen für diesen Befehl."
+                    if not interaction.response.is_done():
+                        await reply_error(interaction, msg, ephemeral=True)
+                    else:
+                        await interaction.followup.send(
+                            embed=discord.Embed(description=msg, color=discord.Color.red()),
+                            ephemeral=True,
+                        )
+                except Exception:
+                    pass
+                return
+
+            # Spezifisch: fehlende Rechte
             if isinstance(error, app_commands.MissingPermissions):
                 try:
                     await reply_error(interaction, "❌ Dir fehlen die nötigen Berechtigungen.", ephemeral=True)
                 except Exception:
                     pass
                 return
+
+            # Cooldowns nett erklären
             if isinstance(error, app_commands.CommandOnCooldown):
                 try:
                     await reply_text(
@@ -108,6 +124,7 @@ class FazzerBot(commands.Bot):
                     pass
                 return
 
+            # Fallback: ordentlich loggen + kurze Meldung
             cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
             log.exception(f"Slash-Command-Error in /{cmd_name}: {error}")
             try:
