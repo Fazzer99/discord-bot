@@ -56,6 +56,9 @@ class VcTrackingSimpleCog(commands.Cog):
         channel: discord.VoiceChannel,
         log_channel: Optional[discord.TextChannel] = None,
     ):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         gid = interaction.guild.id
 
         # 1) darf NICHT parallel vc_override sein

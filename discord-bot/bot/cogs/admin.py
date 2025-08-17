@@ -172,6 +172,9 @@ class AdminCog(commands.Cog):
         if module not in allowed:
             return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
 
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         gid = interaction.guild.id
 
         if module == "autorole":

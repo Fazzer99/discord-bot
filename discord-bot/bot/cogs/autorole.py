@@ -48,6 +48,10 @@ class AutoroleCog(commands.Cog):
         role="Rolle, die neuen Mitgliedern automatisch zugewiesen werden soll"
     )
     async def set_autorole(self, interaction: discord.Interaction, role: discord.Role):
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         guild = interaction.guild
         me = guild.me
 

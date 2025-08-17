@@ -267,6 +267,9 @@ class VcTrackingOverrideCog(commands.Cog):
         target_role5: Optional[discord.Role] = None,
         log_channel: Optional[discord.TextChannel] = None,
     ):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+            
         # 1) Konflikt-Prüfung: darf nicht parallel vc_track sein
         exists_track = await fetchrow(
             "SELECT 1 FROM public.vc_tracking WHERE guild_id=$1 AND channel_id=$2",
