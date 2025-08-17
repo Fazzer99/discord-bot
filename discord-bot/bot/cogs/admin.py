@@ -12,6 +12,31 @@ from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..db import execute, fetchrow  # fetchrow bleibt importiert, falls du es später brauchst
 from ..utils.timezones import validate_tz, guess_tz_from_locale, search_timezones  # NEU
 
+# ---------- Autocomplete-Handler (müssen async sein!) ----------
+
+async def tz_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+):
+    """Autocomplete für TZ-Felder (max. 25 Einträge)."""
+    results = [
+        app_commands.Choice(name=z, value=z)
+        for z in search_timezones(current)[:25]
+    ]
+    return results
+
+# Für set_timezone (anderer Param-Name, gleiche Logik)
+async def tz_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+):
+    results = [
+        app_commands.Choice(name=z, value=z)
+        for z in search_timezones(current)[:25]
+    ]
+    return results
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -38,12 +63,7 @@ class AdminCog(commands.Cog):
     # ---------------------------------------------------------------------
     # /onboard — einmalige Einrichtung: Sprache + Zeitzone
     # ---------------------------------------------------------------------
-    @app_commands.autocomplete(
-        tz=lambda inter, cur: [
-            app_commands.Choice(name=z, value=z)
-            for z in search_timezones(cur)[:25]
-        ]
-    )
+    @app_commands.autocomplete(tz=tz_autocomplete)
     @app_commands.command(
         name="onboard",
         description="Einmalige Einrichtung: Sprache (de|en) und Zeitzone setzen."
@@ -81,12 +101,7 @@ class AdminCog(commands.Cog):
     # ---------------------------------------------------------------------
     # /set_timezone — Zeitzone separat ändern
     # ---------------------------------------------------------------------
-    @app_commands.autocomplete(
-        name=lambda inter, cur: [
-            app_commands.Choice(name=z, value=z)
-            for z in search_timezones(cur)[:25]
-        ]
-    )
+    @app_commands.autocomplete(name=tz_name_autocomplete)
     @app_commands.command(name="set_timezone", description="Zeitzone ändern (IANA-Name, z. B. Europe/Berlin).")
     @require_manage_guild()
     @app_commands.describe(name="IANA-Zeitzone")
