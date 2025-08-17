@@ -47,42 +47,20 @@ class FazzerBot(commands.Bot):
         # 2a) Statische DE->EN Localizations für Slash-Commands anlegen
         await self._apply_de_en_localizations()
 
-        # 2b) Sprach-Check an ALLE Slash-Commands hängen
-        async def _lang_check(interaction: discord.Interaction) -> bool:
-            # DMs & /setlang immer erlauben
-            if interaction.guild is None:
-                return True
-            cmd = interaction.command
-            if cmd and cmd.name == "setlang":
-                return True
+        # 2b) Globale Checks an alle Slash-Commands hängen
+        from .utils.checks import ensure_onboarded
 
-            from .services.guild_config import get_guild_cfg
-            from .utils.replies import reply_text
+        async def _onboard_check(interaction: discord.Interaction) -> bool:
+            return await ensure_onboarded(interaction)
 
-            cfg = await get_guild_cfg(interaction.guild.id)
-            lang = (cfg.get("lang") or "").lower()
-            if lang in ("de", "en"):
-                return True
-
-            await reply_text(
-                interaction,
-                "🌐 Bitte zuerst die Sprache wählen mit `/setlang de` oder `/setlang en`.\n"
-                "🌐 Please choose a language first: `/setlang de` or `/setlang en`.",
-                kind="warning",
-                ephemeral=True,
-            )
-            # sauber abbrechen; der Tree-Error-Handler antwortet ebenfalls freundlich
-            raise app_commands.CheckFailure("Guild language not set")
-
-        # Checks an alle Commands anhängen
         for cmd in list(self.tree.get_commands()):
             if isinstance(cmd, app_commands.Command):
-                if cmd.name != "setlang":
-                    cmd.checks.append(_lang_check)  # type: ignore[attr-defined]
+                if cmd.name not in {"setlang", "onboard", "set_timezone"}:
+                    cmd.checks.append(_onboard_check)  # type: ignore[attr-defined]
             elif isinstance(cmd, app_commands.Group):
                 for sub in cmd.walk_commands():
-                    if sub.name != "setlang":
-                        sub.checks.append(_lang_check)  # type: ignore[attr-defined]
+                    if sub.name not in {"setlang", "onboard", "set_timezone"}:
+                        sub.checks.append(_onboard_check)  # type: ignore[attr-defined]
 
         # 2c) Tree-Error-Handler: schickt IMMER eine freundliche Antwort
         from .utils.replies import reply_text, reply_error

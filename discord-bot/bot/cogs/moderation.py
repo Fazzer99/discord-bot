@@ -35,6 +35,10 @@ class ModerationCog(commands.Cog):
         start_time: str,
         duration: int
     ):
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         if duration <= 0:
             return await reply_text(interaction, "❌ Ungültige Dauer.", kind="error")
 
@@ -138,6 +142,10 @@ class ModerationCog(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel | discord.VoiceChannel
     ):
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         everyone = interaction.guild.default_role
 
         # laufende Task abbrechen

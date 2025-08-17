@@ -39,46 +39,54 @@ def require_manage_messages():
         return True
     return app_commands.check(predicate)
 
-# ------------------------ Globaler Sprach-Guard --------------------------
+# ------------------------ Globaler Onboarding-Guard ----------------------
 
-async def ensure_lang_for_interaction(interaction: discord.Interaction) -> bool:
+async def ensure_onboarded(interaction: discord.Interaction) -> bool:
     """
-    True -> Sprache ist gesetzt (de|en) oder Ausnahmefall.
-    Ausnahmefälle: DMs (keine Guild) oder der Befehl ist 'setlang'.
-    Wenn Sprache fehlt, wird ein Hinweis-Embed gesendet und ein CheckFailure geworfen.
+    True -> Guild hat Sprache (de|en) UND Zeitzone (tz/timezone) gesetzt.
+    Ausnahmefälle: DMs oder Befehle /setlang, /onboard, /set_timezone (die dürfen immer).
+    Wenn Onboarding fehlt, wird ein Hinweis-Embed gesendet und ein CheckFailure geworfen.
     """
     # DMs / keine Guild: nicht blocken
     if interaction.guild is None:
         return True
 
-    # /setlang darf immer durch
+    # Diese Commands dürfen immer durch
     cmd_name = interaction.command.name if interaction.command else ""
-    if cmd_name == "setlang":
+    if cmd_name in {"setlang", "onboard", "set_timezone"}:
         return True
 
     # Lazy-Imports vermeiden Zirkularimporte
     from ..services.guild_config import get_guild_cfg
     from .replies import reply_text
+    from ..utils.timezones import guess_tz_from_locale
 
     cfg = await get_guild_cfg(interaction.guild.id)
     lang = (cfg.get("lang") or "").lower()
-    if lang in ("de", "en"):
+    tz = cfg.get("tz") or cfg.get("timezone")
+
+    if lang in ("de", "en") and (tz is not None and str(tz).strip()):
         return True
 
-    # Sprache nicht gesetzt -> Hinweis + Abbruch
+    # Vorschlag aus Guild-Locale berechnen
+    preferred_locale = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
+    suggestion = guess_tz_from_locale(preferred_locale)
+
+    # Hinweis + Abbruch
     await reply_text(
         interaction,
-        "🌐 Bitte zuerst die Sprache wählen mit `/setlang de` oder `/setlang en`.\n"
-        "🌐 Please choose a language first: `/setlang de` or `/setlang en`.",
+        "🧩 Dieser Server ist noch nicht vollständig eingerichtet.\n"
+        "Bitte führe **/onboard** aus und wähle Sprache **(de|en)** sowie **Zeitzone**.\n"
+        f"Vorschlag für Zeitzone: `{suggestion}`",
         kind="warning",
         ephemeral=True,
     )
-    raise app_commands.CheckFailure("Guild language not set")
+    raise app_commands.CheckFailure("Guild not onboarded")
 
-class GuildLangGuard:
+class GuildOnboardGuard:
     """
-    Mixin für Cogs: Führt vor JEDEM App-Command der Cog den Sprach-Check aus.
-    Anwendung: class MyCog(GuildLangGuard, commands.Cog): ...
+    Mixin für Cogs: Führt vor JEDEM App-Command der Cog den Onboarding-Check aus.
+    Anwendung: class MyCog(GuildOnboardGuard, commands.Cog): ...
     """
     async def cog_app_command_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]
-        return await ensure_lang_for_interaction(interaction)
+        return await ensure_onboarded(interaction)

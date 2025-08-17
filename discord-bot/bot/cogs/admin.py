@@ -7,9 +7,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..utils.checks import require_manage_guild
-from ..utils.replies import reply_text
+from ..utils.replies import reply_text, reply_error, reply_success
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..db import execute, fetchrow  # fetchrow bleibt importiert, falls du es später brauchst
+from ..utils.timezones import validate_tz, guess_tz_from_locale, search_timezones  # NEU
 
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -33,6 +34,78 @@ class AdminCog(commands.Cog):
         await update_guild_cfg(interaction.guild.id, lang=lang)
         msg = "✅ Sprache gesetzt auf **Deutsch**." if lang == "de" else "✅ Language set to **English**."
         return await reply_text(interaction, msg, kind="success")
+
+    # ---------------------------------------------------------------------
+    # /onboard — einmalige Einrichtung: Sprache + Zeitzone
+    # ---------------------------------------------------------------------
+    @app_commands.autocomplete(
+        tz=lambda inter, cur: [
+            app_commands.Choice(name=z, value=z)
+            for z in search_timezones(cur)[:25]
+        ]
+    )
+    @app_commands.command(
+        name="onboard",
+        description="Einmalige Einrichtung: Sprache (de|en) und Zeitzone setzen."
+    )
+    @require_manage_guild()
+    @app_commands.describe(
+        lang="de oder en",
+        tz="IANA-Zeitzone (z. B. Europe/Berlin, UTC …)"
+    )
+    async def onboard(self, interaction: discord.Interaction, lang: str, tz: str):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        lang = (lang or "").lower().strip()
+        if lang not in ("de", "en"):
+            return await reply_error(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", ephemeral=True)
+
+        tz_ok = validate_tz(tz)
+        if not tz_ok:
+            pref = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
+            sug = guess_tz_from_locale(pref)
+            return await reply_error(
+                interaction,
+                f"❌ Ungültige Zeitzone. Beispiele: `Europe/Berlin`, `UTC`.\nVorschlag: `{sug}`",
+                ephemeral=True
+            )
+
+        await update_guild_cfg(interaction.guild.id, lang=lang, tz=tz_ok)
+        return await reply_success(
+            interaction,
+            f"✅ Einrichtung abgeschlossen.\nSprache: **{'Deutsch' if lang=='de' else 'English'}**, Zeitzone: **{tz_ok}**.",
+            ephemeral=True
+        )
+
+    # ---------------------------------------------------------------------
+    # /set_timezone — Zeitzone separat ändern
+    # ---------------------------------------------------------------------
+    @app_commands.autocomplete(
+        name=lambda inter, cur: [
+            app_commands.Choice(name=z, value=z)
+            for z in search_timezones(cur)[:25]
+        ]
+    )
+    @app_commands.command(name="set_timezone", description="Zeitzone ändern (IANA-Name, z. B. Europe/Berlin).")
+    @require_manage_guild()
+    @app_commands.describe(name="IANA-Zeitzone")
+    async def set_timezone(self, interaction: discord.Interaction, name: str):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        name_ok = validate_tz(name)
+        if not name_ok:
+            pref = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
+            sug = guess_tz_from_locale(pref)
+            return await reply_error(
+                interaction,
+                f"❌ Ungültige Zeitzone. Beispiele: `Europe/Berlin`, `UTC`.\nVorschlag: `{sug}`",
+                ephemeral=True
+            )
+
+        await update_guild_cfg(interaction.guild.id, tz=name_ok)
+        return await reply_success(interaction, f"🕒 Zeitzone auf **{name_ok}** gesetzt.", ephemeral=True)
 
     # ---------------------------------------------------------------------
     # Globaler Check als Funktion – wird per Dekorator an Commands gehängt
