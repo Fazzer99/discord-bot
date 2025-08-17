@@ -9,9 +9,9 @@ from ..services.translation import translate_text_for_guild
 
 COLOR_MAP = {
     "success": discord.Color.green(),
-    "error": discord.Color.red(),
+    "error":   discord.Color.red(),
     "warning": discord.Color.gold(),
-    "info": discord.Color.blurple(),
+    "info":    discord.Color.blurple(),
 }
 
 def _pick_color(kind: Optional[str] = None, fallback: Optional[discord.Color] = None) -> discord.Color:
@@ -61,9 +61,25 @@ def _guild_id(target) -> Optional[int]:
     return g.id if g else None
 
 async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed, ephemeral: bool = False):
-    if not inter.response.is_done():
-        return await inter.response.send_message(embed=embed, ephemeral=ephemeral)
-    return await inter.followup.send(embed=embed, ephemeral=ephemeral)
+    """
+    Schickt eine Nachricht zu einer Interaction.
+    - Wenn noch NICHT geantwortet/deferred wurde -> response.send_message()
+    - Wenn bereits geantwortet/deferred -> followup.send()
+    - Fallback: wenn das Interaction-Token ungültig ist (NotFound), sende in den Kanal.
+    """
+    try:
+        if not inter.response.is_done():
+            return await inter.response.send_message(embed=embed, ephemeral=ephemeral)
+        else:
+            return await inter.followup.send(embed=embed, ephemeral=ephemeral)
+    except discord.NotFound:
+        # Interaction-Token bereits invalid -> versuche Kanal-Fallback
+        try:
+            if inter.channel:
+                return await inter.channel.send(embed=embed)
+        except Exception:
+            pass
+        return None
 
 # --------------------------------- API: Replies --------------------------------
 
