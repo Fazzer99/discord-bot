@@ -9,33 +9,8 @@ from discord.ext import commands
 from ..utils.checks import require_manage_guild
 from ..utils.replies import reply_text, reply_error, reply_success
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
-from ..db import execute, fetchrow  # fetchrow bleibt importiert, falls du es später brauchst
-from ..utils.timezones import validate_tz, guess_tz_from_locale, search_timezones  # NEU
-
-# ---------- Autocomplete-Handler (müssen async sein!) ----------
-
-async def tz_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-):
-    """Autocomplete für TZ-Felder (max. 25 Einträge)."""
-    results = [
-        app_commands.Choice(name=z, value=z)
-        for z in search_timezones(current)[:25]
-    ]
-    return results
-
-# Für set_timezone (anderer Param-Name, gleiche Logik)
-async def tz_name_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-):
-    results = [
-        app_commands.Choice(name=z, value=z)
-        for z in search_timezones(current)[:25]
-    ]
-    return results
-
+from ..db import execute, fetchrow
+from ..utils.timezones import parse_utc_offset_to_minutes, format_utc_offset  # <— NEU
 
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -48,32 +23,30 @@ class AdminCog(commands.Cog):
     @require_manage_guild()
     @app_commands.describe(lang="Zulässig: de | en")
     async def setlang(self, interaction: discord.Interaction, lang: str):
-
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
         lang = (lang or "").strip().lower()
         if lang not in ("de", "en"):
-            return await reply_text(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", kind="error")
+            return await reply_error(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", ephemeral=True)
 
         await update_guild_cfg(interaction.guild.id, lang=lang)
         msg = "✅ Sprache gesetzt auf **Deutsch**." if lang == "de" else "✅ Language set to **English**."
-        return await reply_text(interaction, msg, kind="success")
+        return await reply_success(interaction, msg, ephemeral=True)
 
     # ---------------------------------------------------------------------
-    # /onboard — einmalige Einrichtung: Sprache + Zeitzone
+    # /onboard — einmalige Einrichtung: Sprache + UTC-Offset
     # ---------------------------------------------------------------------
-    @app_commands.autocomplete(tz=tz_autocomplete)
     @app_commands.command(
         name="onboard",
-        description="Einmalige Einrichtung: Sprache (de|en) und Zeitzone setzen."
+        description="Einmalige Einrichtung: Sprache (de|en) und UTC-Offset (z. B. +2, -5.75, +4.5) setzen."
     )
     @require_manage_guild()
     @app_commands.describe(
         lang="de oder en",
-        tz="IANA-Zeitzone (z. B. Europe/Berlin, UTC …)"
+        utc_offset="UTC-Offset in Stunden (Viertelstunden erlaubt): z. B. +2, -5.75, +4.5"
     )
-    async def onboard(self, interaction: discord.Interaction, lang: str, tz: str):
+    async def onboard(self, interaction: discord.Interaction, lang: str, utc_offset: float):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
@@ -81,46 +54,51 @@ class AdminCog(commands.Cog):
         if lang not in ("de", "en"):
             return await reply_error(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", ephemeral=True)
 
-        tz_ok = validate_tz(tz)
-        if not tz_ok:
-            pref = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
-            sug = guess_tz_from_locale(pref)
+        tz_minutes = parse_utc_offset_to_minutes(utc_offset)
+        if tz_minutes is None:
             return await reply_error(
                 interaction,
-                f"❌ Ungültige Zeitzone. Beispiele: `Europe/Berlin`, `UTC`.\nVorschlag: `{sug}`",
-                ephemeral=True
+                "❌ Ungültiger UTC-Offset. Erlaubt sind Viertelstunden in der Spanne **-12.0** bis **+14.0**.\n"
+                "Beispiele: `+2`, `-5.75`, `+4.5`",
+                ephemeral=True,
             )
 
-        await update_guild_cfg(interaction.guild.id, lang=lang, tz=tz_ok)
+        await update_guild_cfg(interaction.guild.id, lang=lang, tz=tz_minutes)
         return await reply_success(
             interaction,
-            f"✅ Einrichtung abgeschlossen.\nSprache: **{'Deutsch' if lang=='de' else 'English'}**, Zeitzone: **{tz_ok}**.",
-            ephemeral=True
+            f"✅ Einrichtung abgeschlossen.\n"
+            f"Sprache: **{'Deutsch' if lang == 'de' else 'English'}**, "
+            f"Zeitzone: **{format_utc_offset(tz_minutes)}**.",
+            ephemeral=True,
         )
 
     # ---------------------------------------------------------------------
-    # /set_timezone — Zeitzone separat ändern
+    # /set_timezone — UTC-Offset separat ändern
     # ---------------------------------------------------------------------
-    @app_commands.autocomplete(name=tz_name_autocomplete)
-    @app_commands.command(name="set_timezone", description="Zeitzone ändern (IANA-Name, z. B. Europe/Berlin).")
+    @app_commands.command(
+        name="set_timezone",
+        description="Setzt die Zeitzone als UTC-Offset (z. B. +2, -5.75, +4.5)."
+    )
     @require_manage_guild()
-    @app_commands.describe(name="IANA-Zeitzone")
-    async def set_timezone(self, interaction: discord.Interaction, name: str):
+    @app_commands.describe(utc_offset="UTC-Offset in Stunden (Viertelstunden erlaubt): z. B. +2, -5.75, +4.5")
+    async def set_timezone(self, interaction: discord.Interaction, utc_offset: float):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        name_ok = validate_tz(name)
-        if not name_ok:
-            pref = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
-            sug = guess_tz_from_locale(pref)
+        tz_minutes = parse_utc_offset_to_minutes(utc_offset)
+        if tz_minutes is None:
             return await reply_error(
                 interaction,
-                f"❌ Ungültige Zeitzone. Beispiele: `Europe/Berlin`, `UTC`.\nVorschlag: `{sug}`",
-                ephemeral=True
+                "❌ Ungültiger UTC-Offset. Erlaubt sind Viertelstunden in der Spanne **-12.0** bis **+14.0**.",
+                ephemeral=True,
             )
 
-        await update_guild_cfg(interaction.guild.id, tz=name_ok)
-        return await reply_success(interaction, f"🕒 Zeitzone auf **{name_ok}** gesetzt.", ephemeral=True)
+        await update_guild_cfg(interaction.guild.id, tz=tz_minutes)
+        return await reply_success(
+            interaction,
+            f"🕒 Zeitzone auf **{format_utc_offset(tz_minutes)}** gesetzt.",
+            ephemeral=True,
+        )
 
     # ---------------------------------------------------------------------
     # Globaler Check als Funktion – wird per Dekorator an Commands gehängt
@@ -141,14 +119,13 @@ class AdminCog(commands.Cog):
         await reply_text(
             interaction,
             "🌐 Bitte zuerst die Sprache wählen mit `/setlang de` oder `/setlang en`.",
-            kind="warning"
+            kind="warning",
+            ephemeral=True,
         )
-        # Abbruch
         raise app_commands.CheckFailure("Guild language not set")
 
     # ---------------------------------------------------------------------
     # /setup — Interaktives Setup (nur: welcome, leave)
-    #  -> mit Timeout-freundlichem ask()-Helper
     # ---------------------------------------------------------------------
     @app_commands.command(
         name="setup",
@@ -160,9 +137,8 @@ class AdminCog(commands.Cog):
         module = (module or "").lower()
         valid = ("welcome", "leave")
         if module not in valid:
-            return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
+            return await reply_error(interaction, "❌ Unbekanntes Modul.", ephemeral=True)
 
-        # Interaction sofort quittieren, damit kein „… denkt nach …“ bleibt
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 "🧩 Setup gestartet. Ich stelle dir gleich ein paar Fragen in diesem Kanal. "
@@ -173,7 +149,6 @@ class AdminCog(commands.Cog):
         author = interaction.user
         channel = interaction.channel
 
-        # ---------- Helper ----------
         def _same_author_same_channel(m: discord.Message) -> bool:
             return (m.author == author) and (m.channel == channel)
 
@@ -182,15 +157,9 @@ class AdminCog(commands.Cog):
             *,
             want_channels: bool = False,
             want_roles: bool = False,
-            accept_predicate = None,
+            accept_predicate=None,
             timeout: int = 60,
         ) -> discord.Message | None:
-            """
-            Schickt Prompt, wartet auf Antwort. Bei Timeout: freundliche Meldung, None zurück.
-            - want_channels: Antwort muss Channel-Mentions enthalten
-            - want_roles:    Antwort muss Role-Mentions enthalten
-            - accept_predicate(msg): bool – zusätzliche Validierung (z.B. ja/nein)
-            """
             await reply_text(channel, prompt_de, kind="info")
             def _check(m: discord.Message) -> bool:
                 if not _same_author_same_channel(m):
@@ -202,7 +171,6 @@ class AdminCog(commands.Cog):
                 if accept_predicate and not accept_predicate(m):
                     return False
                 return True
-
             try:
                 return await self.bot.wait_for("message", check=_check, timeout=timeout)
             except asyncio.TimeoutError:
@@ -213,7 +181,7 @@ class AdminCog(commands.Cog):
                 )
                 return None
 
-        # ---------- welcome / leave ----------
+        # welcome / leave
         msg_ch = await ask(f"❓ Bitte erwähne den Kanal für **{module}**-Nachrichten.", want_channels=True)
         if not msg_ch:
             return
@@ -234,7 +202,6 @@ class AdminCog(commands.Cog):
             )
             if not msg2:
                 return
-
             cfg = await get_guild_cfg(interaction.guild.id)
             raw = cfg.get("templates") or {}
             if isinstance(raw, str):
@@ -247,7 +214,7 @@ class AdminCog(commands.Cog):
             current_templates[module] = msg2.content
             await update_guild_cfg(interaction.guild.id, templates=current_templates)
 
-        return await reply_text(channel, f"🎉 **{module}**-Setup abgeschlossen!", kind="success")
+        return await reply_success(channel, f"🎉 **{module}**-Setup abgeschlossen!")
 
     # ---------------------------------------------------------------------
     # /disable — Modul deaktivieren (optional: EIN Kanal für vc_*)
@@ -262,7 +229,7 @@ class AdminCog(commands.Cog):
         module = (module or "").lower()
         allowed = ("welcome", "leave", "vc_override", "autorole", "vc_track")
         if module not in allowed:
-            return await reply_text(interaction, "❌ Unbekanntes Modul.", kind="error")
+            return await reply_error(interaction, "❌ Unbekanntes Modul.", ephemeral=True)
 
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
@@ -271,14 +238,14 @@ class AdminCog(commands.Cog):
 
         if module == "autorole":
             await update_guild_cfg(gid, default_role=None)
-            return await reply_text(interaction, "🗑️ Modul **autorole** wurde deaktiviert.", kind="success")
+            return await reply_success(interaction, "🗑️ Modul **autorole** wurde deaktiviert.", ephemeral=True)
 
         if module == "vc_track":
             if channel:
                 await execute("DELETE FROM vc_tracking WHERE guild_id=$1 AND channel_id=$2", gid, channel.id)
-                return await reply_text(interaction, f"🗑️ VC-Tracking entfernt für {channel.mention}.", kind="success")
+                return await reply_success(interaction, f"🗑️ VC-Tracking entfernt für {channel.mention}.", ephemeral=True)
             await execute("DELETE FROM vc_tracking WHERE guild_id=$1", gid)
-            return await reply_text(interaction, "🗑️ VC-Tracking für **alle** Voice-Channels entfernt.", kind="success")
+            return await reply_success(interaction, "🗑️ VC-Tracking für **alle** Voice-Channels entfernt.", ephemeral=True)
 
         if module in ("welcome", "leave"):
             cfg = await get_guild_cfg(gid)
@@ -299,14 +266,14 @@ class AdminCog(commands.Cog):
             fields["templates"] = tpl
 
             await update_guild_cfg(gid, **fields)
-            return await reply_text(interaction, f"🗑️ Modul **{module}** deaktiviert und Einstellungen gelöscht.", kind="success")
+            return await reply_success(interaction, f"🗑️ Modul **{module}** deaktiviert und Einstellungen gelöscht.", ephemeral=True)
 
         if module == "vc_override":
             if channel:
                 await execute("DELETE FROM vc_overrides WHERE guild_id=$1 AND channel_id=$2", gid, channel.id)
-                return await reply_text(interaction, f"🗑️ vc_override-Overrides für {channel.mention} wurden entfernt.", kind="success")
+                return await reply_success(interaction, f"🗑️ vc_override-Overrides für {channel.mention} wurden entfernt.", ephemeral=True)
             await execute("DELETE FROM vc_overrides WHERE guild_id=$1", gid)
-            return await reply_text(interaction, "🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.", kind="success")
+            return await reply_success(interaction, "🗑️ Alle vc_override-Overrides für diese Guild wurden entfernt.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

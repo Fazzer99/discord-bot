@@ -1,32 +1,68 @@
 # bot/utils/timezones.py
 from __future__ import annotations
-from zoneinfo import ZoneInfo, available_timezones
+from typing import Optional
 
-ALL_TZS = sorted(available_timezones())
+_MIN_OFFSET_MIN = -12 * 60   # -720
+_MAX_OFFSET_MIN =  14 * 60   #  840
 
-def guess_tz_from_locale(locale: str | None) -> str:
-    """Sehr simple Heuristik: de* -> Europe/Berlin, sonst UTC."""
-    loc = (locale or "").lower()
-    if loc.startswith("de"):
-        return "Europe/Berlin"
-    return "UTC"
-
-def validate_tz(name: str | None) -> str | None:
-    """Gültige IANA-Zeitzone zurückgeben, sonst None."""
-    try:
-        if not name:
-            return None
-        ZoneInfo(name)  # wirft bei Ungültigkeit
-        return name
-    except Exception:
+def parse_utc_offset_to_minutes(value: object) -> Optional[int]:
+    """
+    Akzeptiert z.B.: 2, "2", "+2", "UTC+2", "+4.5", "-5,75", "utc-3.25"
+    Liefert Minuten (int) oder None bei ungültig.
+    Nur 15-Minuten-Schritte sind erlaubt.
+    Range: -12:00 .. +14:00
+    """
+    if value is None:
         return None
 
-def search_timezones(query: str) -> list[str]:
-    """Einfache Suche (case-insensitiv, Teilstring) – max. 25 Ergebnisse."""
-    q = (query or "").lower()
-    if not q:
-        # ein paar beliebte Defaults zuerst
-        seeds = ["Europe/Berlin", "UTC", "Europe/Vienna", "Europe/Zurich", "Europe/London", "America/New_York"]
-        return [tz for tz in seeds if tz in ALL_TZS][:25]
-    out = [tz for tz in ALL_TZS if q in tz.lower()]
-    return out[:25]
+    # floats/ints direkt
+    if isinstance(value, (int, float)):
+        minutes = round(float(value) * 60)
+        return minutes if _validate_minutes(minutes) else None
+
+    # strings flexibel parsen
+    s = str(value).strip().upper()  # Groß/Klein egal
+    if not s:
+        return None
+    # UTC-Präfix optional entfernen
+    if s.startswith("UTC"):
+        s = s[3:].strip()
+
+    # Komma zu Punkt
+    s = s.replace(",", ".")
+
+    # Leeres/alleinstehendes +/- -> ungültig
+    if s in {"+", "-"}:
+        return None
+
+    try:
+        hours = float(s)
+    except ValueError:
+        # evtl. +2, -5.75 etc. ohne "UTC"
+        try:
+            hours = float(s.replace("UTC", ""))
+        except Exception:
+            return None
+
+    minutes = round(hours * 60)
+    return minutes if _validate_minutes(minutes) else None
+
+
+def _validate_minutes(minutes: int) -> bool:
+    if minutes < _MIN_OFFSET_MIN or minutes > _MAX_OFFSET_MIN:
+        return False
+    # Viertelstunden prüfen
+    return (minutes % 15) == 0
+
+
+def format_utc_offset(minutes: int) -> str:
+    """
+    120 -> 'UTC+2'
+    -345 -> 'UTC-5.75'
+    90 -> 'UTC+1.5'
+    """
+    sign = "+" if minutes >= 0 else "-"
+    hours = abs(minutes) / 60.0
+    # bis zu 2 Nachkommastellen, aber ohne überflüssige Nullen
+    txt = f"{hours:.2f}".rstrip("0").rstrip(".")
+    return f"UTC{sign}{txt}"

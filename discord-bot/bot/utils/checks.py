@@ -9,7 +9,6 @@ def require_manage_guild():
     """Slash-Check: Nutzer braucht 'Server verwalten' oder Admin. Wirft MissingPermissions bei Verstoß."""
     def predicate(inter: discord.Interaction) -> bool:
         if inter.guild is None:
-            # In DMs macht der Befehl keinen Sinn
             raise app_commands.CheckFailure("Guild-only command")
         perms = getattr(inter.user, "guild_permissions", None)
         if not perms or not (perms.manage_guild or perms.administrator):
@@ -43,45 +42,34 @@ def require_manage_messages():
 
 async def ensure_onboarded(interaction: discord.Interaction) -> bool:
     """
-    True -> Guild hat Sprache (de|en) UND Zeitzone (tz/timezone) gesetzt.
-    Ausnahmefälle: DMs oder Befehle /setlang, /onboard, /set_timezone (die dürfen immer).
-    Wenn Onboarding fehlt, wird ein Hinweis-Embed gesendet und ein CheckFailure geworfen.
+    True -> Guild hat Sprache (de|en) UND Zeitzone (tz=UTC-Minuten) gesetzt.
+    Ausnahmefälle: DMs oder Befehle /setlang, /onboard, /set_timezone.
     """
-    # DMs / keine Guild: nicht blocken
     if interaction.guild is None:
         return True
 
-    # Diese Commands dürfen immer durch
     cmd_name = interaction.command.name if interaction.command else ""
     if cmd_name in {"setlang", "onboard", "set_timezone"}:
         return True
 
-    # Lazy-Imports vermeiden Zirkularimporte
     from ..services.guild_config import get_guild_cfg
     from .replies import reply_text
-    from ..utils.timezones import guess_tz_from_locale
 
     cfg = await get_guild_cfg(interaction.guild.id)
     lang = (cfg.get("lang") or "").lower()
-    tz = cfg.get("tz") or cfg.get("timezone")
+    tz = cfg.get("tz")  # Minuten (int) erwartet
 
-    if lang in ("de", "en") and (tz is not None and str(tz).strip()):
+    if lang in ("de", "en") and isinstance(tz, int):
         return True
 
-    # <<< WICHTIG: zuerst defer, damit Discord nicht "Anwendung reagiert nicht" zeigt
+    # Hinweis + Abbruch
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
-
-    # Vorschlag aus Guild-Locale berechnen
-    preferred_locale = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
-    suggestion = guess_tz_from_locale(preferred_locale)
-
-    # Hinweis + Abbruch
     await reply_text(
         interaction,
         "🧩 Dieser Server ist noch nicht vollständig eingerichtet.\n"
-        "Bitte führe **/onboard** aus und wähle Sprache **(de|en)** sowie **Zeitzone**.\n"
-        f"Vorschlag für Zeitzone: `{suggestion}`",
+        "Bitte führe **/onboard** aus und wähle die Sprache **(de|en)** sowie den **UTC-Offset** "
+        "(z. B. `+2`, `-5.75`, `+4.5`).",
         kind="warning",
         ephemeral=True,
     )
