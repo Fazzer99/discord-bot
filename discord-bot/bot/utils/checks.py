@@ -68,6 +68,10 @@ async def ensure_onboarded(interaction: discord.Interaction) -> bool:
     if lang in ("de", "en") and (tz is not None and str(tz).strip()):
         return True
 
+    # <<< WICHTIG: zuerst defer, damit Discord nicht "Anwendung reagiert nicht" zeigt
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
     # Vorschlag aus Guild-Locale berechnen
     preferred_locale = getattr(interaction.guild, "preferred_locale", None) or getattr(interaction, "guild_locale", None)
     suggestion = guess_tz_from_locale(preferred_locale)
