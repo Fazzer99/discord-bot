@@ -299,7 +299,7 @@ class VcTrackingSimpleCog(commands.Cog):
 
         t0 = sess["running"].pop(member.id, None)
         if t0:
-            add = int((_now() - t0).total_seconds()))
+            add = int((_now() - t0).total_seconds())
             if add > 0:
                 sess["accum"][member.id] = sess["accum"].get(member.id, 0) + add
 
