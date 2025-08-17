@@ -60,6 +60,11 @@ class ModerationCog(commands.Cog):
         channel3="Optional: weiterer Kanal",
         channel4="Optional: weiterer Kanal",
         channel5="Optional: weiterer Kanal",
+        channel6="Optional: weiterer Kanal",
+        channel7="Optional: weiterer Kanal",
+        channel8="Optional: weiterer Kanal",
+        channel9="Optional: weiterer Kanal",
+        channel10="Optional: weiterer Kanal",
         start_time="Startzeit im Format HH:MM (Server-Zeit)",
         duration="Dauer in Minuten"
     )
@@ -227,6 +232,11 @@ class ModerationCog(commands.Cog):
         channel3="Optional: weiterer Kanal",
         channel4="Optional: weiterer Kanal",
         channel5="Optional: weiterer Kanal",
+        channel6="Optional: weiterer Kanal",
+        channel7="Optional: weiterer Kanal",
+        channel8="Optional: weiterer Kanal",
+        channel9="Optional: weiterer Kanal",
+        channel10="Optional: weiterer Kanal",
     )
     async def unlock(
         self,
