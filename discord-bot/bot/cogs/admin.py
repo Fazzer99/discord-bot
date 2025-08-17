@@ -22,6 +22,10 @@ class AdminCog(commands.Cog):
     @require_manage_guild()
     @app_commands.describe(lang="Zulässig: de | en")
     async def setlang(self, interaction: discord.Interaction, lang: str):
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         lang = (lang or "").strip().lower()
         if lang not in ("de", "en"):
             return await reply_text(interaction, "❌ Ungültige Sprache. Erlaubt: `de` oder `en`.", kind="error")
