@@ -19,6 +19,7 @@ EXTENSIONS = [
     "bot.cogs.moderation",
     "bot.cogs.vc_tracking_override",
     "bot.cogs.vc_tracking_simple",
+    "bot.cogs.verify",
     "bot.cogs.welcome_leave",
 ]
 
