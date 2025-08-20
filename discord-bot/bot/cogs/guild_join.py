@@ -20,12 +20,12 @@ class GuildJoinCog(commands.Cog):
         if not features:
             features_text = "Keine Features eingetragen."
         else:
-            # Nur für den Fall, dass du das noch als zusammenhängenden Text brauchst
+            # Nur falls du das noch als zusammenhängenden Text brauchst
             features_text = ""
             for name, desc in features:
                 features_text += f"• **{name}**\n{desc.replace('\\n', '\\n')}\n\n"
 
-        # 2) Kanal finden oder erstellen (wie bei dir)
+        # 2) Kanal finden oder erstellen
         setup_channel = discord.utils.get(guild.text_channels, name=SETUP_CHANNEL_NAME)
         if setup_channel is None:
             try:
@@ -41,20 +41,25 @@ class GuildJoinCog(commands.Cog):
         if not setup_channel:
             return  # gar kein sendbarer Kanal gefunden
 
-        # 3) Intro als Embed (bilingual wie in deinem Original)
+        # 3) Intro: jetzt Onboarding statt setlang
         intro_msg = (
             f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
-            "🌐 Bitte **zuerst die Sprache festlegen** (nur Admins): `/setlang de` oder `/setlang en`.\n"
-            "Solange das nicht passiert, sind alle anderen Befehle gesperrt.\n\n"
-            "🌐 Please **choose the language first** (admins only): `/setlang de` or `/setlang en`.\n"
-            "Until then, all other commands are locked.\n\n"
+            "🧩 **Onboarding (nur Admins):**\n"
+            "1) Sprache festlegen: `/onboard lang:de` **oder** `/onboard lang:en`\n"
+            "2) Zeitzone setzen: `/onboard tz:UTC+2` (Viertelschritte erlaubt: `+0.25`, `+0.5`, `+0.75`, z. B. `UTC-5.75`)\n"
+            "➡️ Du kannst beides **in einem Schritt** setzen: `/onboard lang:de tz:UTC+2`\n\n"
+            "🔒 Solange das Onboarding nicht abgeschlossen ist, sind alle anderen Befehle gesperrt.\n\n"
+            "— — —\n"
+            "🧩 **Onboarding (admins only):**\n"
+            "1) Set language: `/onboard lang:de` **or** `/onboard lang:en`\n"
+            "2) Set timezone: `/onboard tz:UTC+2` (quarter-hour steps supported: `+0.25`, `+0.5`, `+0.75`, e.g. `UTC-5.75`)\n"
+            "➡️ You can also set **both at once**: `/onboard lang:en tz:UTC+2`\n\n"
+            "🔒 Until onboarding is complete, all other commands are locked."
         )
         await reply_text(setup_channel, intro_msg, kind="info")
 
-        # 4) Feature-Liste als Embeds
-        #    - Wir packen mehrere Features als Fields in ein Embed
-        #    - Hard-Limits von Discord: max. 6000 Zeichen/Embed, 25 Felder, 1024 Zeichen pro Field-Value
-        #    - Wir chunk’en sauber über mehrere Embeds falls nötig
+        # 4) Feature-Liste als Embeds (unverändert)
+        #    - Max 25 Felder pro Embed, 1024 Zeichen pro Field-Value, 6000 Zeichen gesamt
         if features:
             current_embed = make_embed(
                 title="🧩 Features",
