@@ -69,7 +69,10 @@ async def ensure_onboarded(interaction: discord.Interaction) -> bool:
         interaction,
         "🧩 Dieser Server ist noch nicht vollständig eingerichtet.\n"
         "Bitte führe **/onboard** aus und wähle die Sprache **(de|en)** sowie den **UTC-Offset** "
-        "(z. B. `+2`, `-5.75`, `+4.5`).",
+        "(z. B. `+2`, `-5.75`, `+4.5`).\n\n"
+        "🧩 This server is not yet fully set up.\n"
+        "Please run **/onboard** and select the language **(de|en)** and the **UTC offset** "
+        "(e.g. `+2`, `-5.75`, `+4.5`).",
         kind="warning",
         ephemeral=True,
     )
