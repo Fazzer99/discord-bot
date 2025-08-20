@@ -1,300 +1,307 @@
 # bot/cogs/verify.py
 from __future__ import annotations
-import asyncio
+import time
 import random
-import string
-from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, Tuple
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..utils.checks import require_manage_guild
-from ..utils.replies import reply_text, reply_error, reply_success, make_embed
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
+from ..utils.checks import require_manage_guild
+from ..utils.replies import make_embed, send_embed, reply_success, reply_error, reply_text
 
-# ------------------------------- Captcha core -------------------------------
+VERIFY_SETTINGS_KEY = "verify"
 
-_CAPTCHA_LEN = 6
-_ALPHABET = string.ascii_uppercase + string.digits  # A–Z + 0–9 (ohne lookalikes? optional)
+# sichere Captcha-Zeichen (ohne 0/O/I/1)
+CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+CAPTCHA_LEN_DEFAULT = 6
+ATTEMPTS_DEFAULT = 3
+COOLDOWN_DEFAULT = 5  # Sekunden
+TTL_DEFAULT = 300     # 5 Min.
 
-def _make_code(n: int = _CAPTCHA_LEN) -> str:
-    # Optional: you could remove ambiguous chars like 0/O, 1/I/L by filtering _ALPHABET
-    return "".join(random.choice(_ALPHABET) for _ in range(n))
+# --------------------------- Captcha-Modal ---------------------------
 
-@dataclass
-class CaptchaSession:
-    code: str
-    attempts_left: int
-    locked_until: float  # epoch seconds; 0 == not locked
+class CaptchaModal(discord.ui.Modal):
+    def __init__(self, cog: "VerifyCog", key: Tuple[int, int], *, title: str = "Captcha Answer"):
+        super().__init__(title=title, timeout=180)
+        self.cog = cog
+        self.key = key  # (guild_id, user_id)
+        self.answer = discord.ui.TextInput(
+            label="Answer",
+            placeholder="Type the code here",
+            required=True,
+            max_length=16
+        )
+        self.add_item(self.answer)
 
-# pro Guild speichern wir ephemere Sessions (User->Session)
-_sessions: Dict[int, Dict[int, CaptchaSession]] = {}   # guild_id -> { user_id: CaptchaSession }
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.validate_captcha_answer(interaction, self.key, self.answer.value)
 
+# --------------------------- Ephemere Answer-View ---------------------------
 
-# ----------------------------- UI: Modal & View -----------------------------
+class AnswerView(discord.ui.View):
+    def __init__(self, cog: "VerifyCog", key: Tuple[int, int], *, timeout: Optional[float] = 300):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.key = key
 
-class CaptchaModal(discord.ui.Modal, title="Captcha Answer"):
-    answer = discord.ui.TextInput(label="Answer", placeholder="Type the code shown in the panel", required=True, max_length=32)
+    @discord.ui.button(label="Answer", style=discord.ButtonStyle.primary, custom_id="ignix_verify_answer")
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CaptchaModal(self.cog, self.key))
 
-    def __init__(self, cog: "VerifyCog"):
-        super().__init__()
+# --------------------------- Haupt-View im Verify-Channel ---------------------------
+
+class VerifyView(discord.ui.View):
+    def __init__(self, cog: "VerifyCog", *, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
         self.cog = cog
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Safety: defer if needed (um "Anwendung reagiert nicht" zu vermeiden)
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="ignix_verify_button")
+    async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_verify_click(interaction)
 
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="ignix_verify_help")
+    async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
-        if guild is None:
-            return await reply_error(interaction, "❌ This only works in a server.", ephemeral=True)
-
-        # Owner brauchen keine Verifizierung
-        if interaction.user.id == guild.owner_id:
-            return await reply_error(interaction, "ℹ️ Du bist der Server-Owner und brauchst keine Verifizierung.", ephemeral=True)
-
+        if not guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
         cfg = await get_guild_cfg(guild.id)
-        role_id  = cfg.get("verify_role_id")
-        attempts = int(cfg.get("verify_attempts") or 3)
-        if not role_id:
-            return await reply_error(interaction, "❌ Verify-Rolle ist noch nicht konfiguriert. Admin: `/set_verify`.", ephemeral=True)
+        v = (cfg.get("settings") or {}).get(VERIFY_SETTINGS_KEY) or {}
+        role_id = v.get("role_id")
+        role_mention = f"<@&{role_id}>" if role_id else "`(not set)`"
 
-        sessmap = _sessions.setdefault(guild.id, {})
-        now = asyncio.get_event_loop().time()
-        sess = sessmap.get(interaction.user.id)
-
-        # Session vorhanden?
-        if not sess:
-            sess = CaptchaSession(code=_make_code(), attempts_left=attempts, locked_until=0.0)
-            sessmap[interaction.user.id] = sess
-
-        # Lock-Prüfung
-        if sess.locked_until and now < sess.locked_until:
-            wait_s = int(sess.locked_until - now)
-            return await reply_error(interaction, f"⏳ Zu viele Fehlversuche. Bitte in **{wait_s}** Sek. erneut versuchen.", ephemeral=True)
-
-        value = str(self.answer.value or "").strip().upper()
-        if value != sess.code.upper():
-            sess.attempts_left -= 1
-            if sess.attempts_left <= 0:
-                # 2-Minuten Cooldown nach X Fehlversuchen
-                sess.locked_until = now + 120
-                sess.attempts_left = attempts
-                # Neues Rätsel beim nächsten Mal
-                sess.code = _make_code()
-                return await reply_error(
-                    interaction, "❌ Falsche Antwort. Du wurdest **für 2 Minuten gesperrt**. Versuche es danach erneut.",
-                    ephemeral=True
-                )
-            else:
-                return await reply_error(
-                    interaction, f"❌ Falsch. Verbleibende Versuche: **{sess.attempts_left}**.",
-                    ephemeral=True
-                )
-
-        # ✅ Erfolg
-        role = guild.get_role(role_id)
-        if not role:
-            return await reply_error(interaction, "❌ Verify-Rolle existiert nicht (wurde evtl. gelöscht). Admin: `/set_verify`.", ephemeral=True)
-
-        try:
-            await interaction.user.add_roles(role, reason="Ignix Verify passed")
-        except discord.Forbidden:
-            return await reply_error(interaction, "❌ Mir fehlt die Berechtigung, die Rolle zu vergeben.", ephemeral=True)
-
-        # Session schließen
-        sessmap.pop(interaction.user.id, None)
-
-        # Logging
-        log_id = cfg.get("verify_log_channel")
-        if log_id:
-            ch = guild.get_channel(log_id)
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    emb = make_embed(
-                        title="✅ Verification passed",
-                        description=f"{interaction.user.mention} hat die Verifizierung bestanden.",
-                        kind="success"
-                    )
-                    await ch.send(embed=emb)
-                except Exception:
-                    pass
-
-        return await reply_success(interaction, "✅ Verifizierung erfolgreich. Willkommen!", ephemeral=True)
-
-
-class VerifyPanel(discord.ui.View):
-    def __init__(self, cog: "VerifyCog"):
-        super().__init__(timeout=None)  # persistent
-        self.cog = cog
-
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="ignix:verify")
-    async def btn_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=False)
-
-        guild = interaction.guild
-        if guild and interaction.user.id == guild.owner_id:
-            return await reply_text(interaction, "ℹ️ Du bist der Server-Owner und musst dich nicht verifizieren.", kind="info", ephemeral=True)
-
-        # neue/fortgesetzte Session anzeigen
-        cfg = await get_guild_cfg(interaction.guild.id)
-        sess = _sessions.setdefault(interaction.guild.id, {}).get(interaction.user.id)
-        code = sess.code if sess else _make_code()
-        if not sess:
-            _sessions[interaction.guild.id][interaction.user.id] = CaptchaSession(
-                code=code, attempts_left=int(cfg.get("verify_attempts") or 3), locked_until=0.0
-            )
-
-        # Kurzen Hinweis + Modal öffnen
-        hint = make_embed(
-            title="🧩 Are you human?",
-            description=(
-                "Bitte **diesen Code** exakt eingeben (Groß/Klein egal):\n"
-                f"`{code}`\n\n"
-                "• Zeichne *keine* Linien – einfach nur den Code abtippen.\n"
-                "• Du hast begrenzte Versuche; bei zu vielen Fehlversuchen kurzer Timeout."
-            ),
-            kind="info"
+        txt = (
+            "🆘 **Verification Help**\n"
+            f"• Press **Verify** to receive the access role {role_mention}.\n"
+            "• If it fails, try again in a few seconds or contact a moderator.\n"
+            "• Owner does not need to verify."
         )
-        try:
-            await interaction.followup.send(embed=hint, ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.send_message(txt, ephemeral=True)
 
-        await interaction.followup.send_modal(CaptchaModal(self.cog))
-
-    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="ignix:verify_help")
-    async def btn_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=False)
-
-        cfg = await get_guild_cfg(interaction.guild.id)
-        role_id = cfg.get("verify_role_id")
-        attempts = int(cfg.get("verify_attempts") or 3)
-        role_txt = f"<@&{role_id}>" if role_id else "—"
-
-        emb = make_embed(
-            title="ℹ️ Verification Help",
-            description=(
-                "Klicke **Verify**, lies den Code und gib ihn im Modal ein.\n"
-                f"• Max. Versuche: **{attempts}**\n"
-                "• Bei zu vielen Fehlversuchen wirst du kurzzeitig gesperrt.\n"
-                f"• Erfolgreich? Du erhältst die Rolle {role_txt}."
-            ),
-            kind="info"
-        )
-        await interaction.followup.send(embed=emb, ephemeral=True)
-
-
-# ---------------------------------- Cog ------------------------------------
+# --------------------------- Cog ---------------------------
 
 class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Register persistent view so buttons keep working across restarts
-        self.bot.add_view(VerifyPanel(self))
+        # cooldowns: user_id -> ts
+        self.cooldowns: Dict[int, float] = {}
+        # challenges: (guild_id, user_id) -> dict(state)
+        self.challenges: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
-    # ------- Admin: Setup & Status -------
-
-    @app_commands.command(name="set_verify", description="Richtet die Verify-Funktion ein und postet ein Panel.")
+    # -------- /set_verify --------
+    @app_commands.command(name="set_verify", description="Richtet die Verifizierung ein und postet die Verify-Nachricht.")
     @require_manage_guild()
     @app_commands.describe(
-        role="Rolle, die nach erfolgreicher Verifizierung vergeben wird",
-        channel="Kanal, in dem das Verify-Panel gepostet werden soll",
-        log_channel="(Optional) Kanal für Verify-Logs",
-        attempts="(Optional) Erlaubte Fehlversuche (Standard 3)"
+        channel="Kanal, in dem die Verify-Nachricht stehen soll",
+        role="Rolle, die nach der Verifizierung vergeben wird",
+        enabled="Feature aktivieren/deaktivieren",
+        cooldown_seconds="Schutz vor Spam-Klicks (Standard 5s)",
+        attempts="Erlaubte Fehlversuche (Standard 3)",
+        ttl_seconds="Zeitfenster für einen Captcha (Standard 300s)",
+        message_de="Optional: eigener deutscher Einleitungstext",
+        message_en="Optional: eigener englischer Einleitungstext",
     )
     async def set_verify(
         self,
         interaction: discord.Interaction,
-        role: discord.Role,
         channel: discord.TextChannel,
-        log_channel: Optional[discord.TextChannel] = None,
-        attempts: Optional[int] = 3,
+        role: discord.Role,
+        enabled: bool = True,
+        cooldown_seconds: int = COOLDOWN_DEFAULT,
+        attempts: int = ATTEMPTS_DEFAULT,
+        ttl_seconds: int = TTL_DEFAULT,
+        message_de: Optional[str] = None,
+        message_en: Optional[str] = None,
     ):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        gid = interaction.guild.id
-        data = {
-            "verify_role_id": role.id,
-            "verify_channel_id": channel.id,
-            "verify_attempts": max(1, int(attempts or 3)),
-        }
-        if log_channel:
-            data["verify_log_channel"] = log_channel.id
+        if role >= interaction.guild.me.top_role:
+            return await reply_error(
+                interaction,
+                "❌ Ich kann diese Rolle nicht vergeben (sie ist gleich/über meiner höchsten Rolle)."
+            )
 
-        await update_guild_cfg(gid, **data)
-
-        # Verify-Panel posten
-        view = VerifyPanel(self)
-        emb = make_embed(
-            title="Verification Required!",
-            description=(
-                "Um Zugang zum Server zu bekommen, musst du die Verifizierung bestehen.\n"
-                "Klicke auf **Verify** und folge den Anweisungen."
+        settings = {
+            "enabled": bool(enabled),
+            "channel_id": channel.id,
+            "role_id": role.id,
+            "cooldown": max(0, int(cooldown_seconds)),
+            "attempts": max(1, int(attempts)),
+            "ttl": max(30, int(ttl_seconds)),
+            "message_de": (message_de or "").strip() or (
+                "🔒 **Verifizierung erforderlich!**\n"
+                "Klicke **Verify**, dann **Answer** und gib den Code ein."
             ),
-            kind="info"
-        )
-        msg = await channel.send(embed=emb, view=view)
-        await update_guild_cfg(gid, verify_panel_message_id=msg.id)
+            "message_en": (message_en or "").strip() or (
+                "🔒 **Verification required!**\n"
+                "Click **Verify**, then **Answer** and enter the code."
+            ),
+        }
+        # nur settings.verify aktualisieren
+        await update_guild_cfg(interaction.guild.id, settings={VERIFY_SETTINGS_KEY: settings})
+
+        emb = self._make_verify_embed(settings)
+        view = VerifyView(self)
+        try:
+            await channel.send(embed=emb, view=view)
+        except discord.Forbidden:
+            return await reply_error(interaction, "❌ Ich darf in diesem Kanal nicht schreiben/Buttons posten.")
+        except Exception:
+            return await reply_error(interaction, "❌ Konnte die Verify-Nachricht nicht senden.")
 
         return await reply_success(
             interaction,
-            f"✅ Verify eingerichtet. Panel gepostet in {channel.mention}. Rolle: {role.mention}.",
-            ephemeral=True
+            f"✅ Verify eingerichtet in {channel.mention} (Rolle: {role.mention})."
         )
 
-    @app_commands.command(name="verify_status", description="Zeigt die aktuelle Verify-Konfiguration.")
+    # -------- /verify_config --------
+    @app_commands.command(name="verify_config", description="Zeigt die aktuelle Verify-Konfiguration.")
     @require_manage_guild()
-    async def verify_status(self, interaction: discord.Interaction):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
-
+    async def verify_config(self, interaction: discord.Interaction):
         cfg = await get_guild_cfg(interaction.guild.id)
-        r = cfg.get("verify_role_id")
-        c = cfg.get("verify_channel_id")
-        l = cfg.get("verify_log_channel")
-        a = int(cfg.get("verify_attempts") or 3)
-        m = cfg.get("verify_panel_message_id")
+        v = (cfg.get("settings") or {}).get(VERIFY_SETTINGS_KEY) or {}
+        ch = interaction.guild.get_channel(v.get("channel_id") or 0)
+        rl = interaction.guild.get_role(v.get("role_id") or 0)
 
         desc = (
-            f"**Role:** {('<@&'+str(r)+'>') if r else '—'}\n"
-            f"**Panel-Channel:** {('<#'+str(c)+'>') if c else '—'}\n"
-            f"**Log-Channel:** {('<#'+str(l)+'>') if l else '—'}\n"
-            f"**Attempts:** {a}\n"
-            f"**Panel-Message ID:** {m or '—'}"
+            f"**Aktiv:** {('ja' if v.get('enabled') else 'nein')}\n"
+            f"**Kanal:** {ch.mention if isinstance(ch, discord.TextChannel) else '—'}\n"
+            f"**Rolle:** {rl.mention if isinstance(rl, discord.Role) else '—'}\n"
+            f"**Cooldown:** {v.get('cooldown', COOLDOWN_DEFAULT)}s\n"
+            f"**Attempts:** {v.get('attempts', ATTEMPTS_DEFAULT)}\n"
+            f"**TTL:** {v.get('ttl', TTL_DEFAULT)}s\n"
         )
-        emb = make_embed(title="🔧 Verify – Konfiguration", description=desc, kind="info")
-        return await interaction.followup.send(embed=emb, ephemeral=True)
+        emb = make_embed(title="🔐 Verify – Konfiguration", description=desc, kind="info")
+        await interaction.response.send_message(embed=emb, ephemeral=True)
 
-    @app_commands.command(name="verify_post", description="Postet das Verify-Panel erneut in den konfigurierten Kanal.")
-    @require_manage_guild()
-    async def verify_post(self, interaction: discord.Interaction):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+    # -------- Button: Verify --------
+    async def handle_verify_click(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
 
-        cfg = await get_guild_cfg(interaction.guild.id)
-        ch_id = cfg.get("verify_channel_id")
-        if not ch_id:
-            return await reply_error(interaction, "❌ Kein Verify-Channel gesetzt. Nutze `/set_verify`.", ephemeral=True)
-        ch = interaction.guild.get_channel(ch_id)
-        if not isinstance(ch, discord.TextChannel):
-            return await reply_error(interaction, "❌ Verify-Channel ist ungültig.", ephemeral=True)
+        cfg = await get_guild_cfg(guild.id)
+        v = (cfg.get("settings") or {}).get(VERIFY_SETTINGS_KEY) or {}
+        if not v.get("enabled"):
+            return await interaction.response.send_message("Verification is currently disabled.", ephemeral=True)
 
-        view = VerifyPanel(self)
-        emb = make_embed(
-            title="Verification Required!",
-            description="Klicke **Verify** und folge den Anweisungen.",
-            kind="info"
+        role_id = v.get("role_id")
+        role = guild.get_role(role_id) if role_id else None
+        if role is None:
+            return await interaction.response.send_message("Verify role is not configured.", ephemeral=True)
+
+        # Owner braucht keine Verifizierung
+        if guild.owner_id == user.id:
+            return await interaction.response.send_message(
+                "ℹ️ Du bist der Server-Owner – eine Verifizierung ist nicht nötig.", ephemeral=True
+            )
+
+        # Schon verifiziert?
+        if role in user.roles:
+            return await interaction.response.send_message("✅ Du bist bereits verifiziert.", ephemeral=True)
+
+        # Cooldown
+        now = time.time()
+        cd = max(0, int(v.get("cooldown", COOLDOWN_DEFAULT)))
+        until = self.cooldowns.get(user.id, 0.0)
+        if now < until:
+            return await interaction.response.send_message(
+                f"⏳ Bitte kurz warten (~{int(until-now)}s) und erneut klicken.", ephemeral=True
+            )
+        self.cooldowns[user.id] = now + cd
+
+        # Challenge generieren und ephemer posten
+        code = self._gen_code(CAPTCHA_LEN_DEFAULT)
+        key = (guild.id, user.id)
+        self.challenges[key] = {
+            "code": code,
+            "expires": now + int(v.get("ttl", TTL_DEFAULT)),
+            "attempts_left": int(v.get("attempts", ATTEMPTS_DEFAULT)),
+            "role_id": role.id,
+        }
+
+        emb = self._make_challenge_embed(code)
+        view = AnswerView(self, key)
+        await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
+
+    # -------- Modal-Validierung --------
+    async def validate_captcha_answer(self, interaction: discord.Interaction, key: Tuple[int, int], answer: str):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+
+        state = self.challenges.get(key)
+        if not state:
+            return await interaction.response.send_message("❌ Challenge abgelaufen. Bitte erneut **Verify** klicken.", ephemeral=True)
+
+        # Ablauf prüfen
+        if time.time() > state["expires"]:
+            self.challenges.pop(key, None)
+            return await interaction.response.send_message("⌛ Challenge abgelaufen. Bitte erneut **Verify** klicken.", ephemeral=True)
+
+        # Antwort prüfen (case-insensitive)
+        if (answer or "").strip().upper() != state["code"]:
+            state["attempts_left"] -= 1
+            if state["attempts_left"] <= 0:
+                self.challenges.pop(key, None)
+                return await interaction.response.send_message("❌ Zu viele Fehlversuche. Bitte kurz warten und neu beginnen.", ephemeral=True)
+
+            # erneuter Versuch möglich
+            emb = make_embed(
+                title="❌ Falsche Antwort",
+                description=f"Versuche übrig: **{state['attempts_left']}**",
+                kind="warning"
+            )
+            view = AnswerView(self, key)
+            return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
+
+        # Korrekt → Rolle vergeben
+        role = guild.get_role(state["role_id"])
+        self.challenges.pop(key, None)
+        if role is None:
+            return await interaction.response.send_message("⚠️ Rolle nicht mehr vorhanden. Bitte melde dich bei einem Mod.", ephemeral=True)
+
+        try:
+            await user.add_roles(role, reason="Ignix Verify (captcha passed)")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ Mir fehlen Rechte, um die Rolle zu vergeben (Rollen-Hierarchie prüfen).", ephemeral=True
+            )
+        except Exception:
+            return await interaction.response.send_message("❌ Unerwarteter Fehler bei der Verifizierung.", ephemeral=True)
+
+        await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
+
+    # ----------------- Helper -----------------
+
+    def _gen_code(self, length: int) -> str:
+        return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
+
+    def _make_verify_embed(self, v: Dict[str, Any]) -> discord.Embed:
+        de = v.get("message_de") or "🔒 **Verifizierung erforderlich!** Klicke **Verify**."
+        en = v.get("message_en") or "🔒 **Verification required!** Click **Verify**."
+        desc = f"{de}\n\n{en}"
+        return make_embed(
+            title="✅ Verification Required!",
+            description=desc,
+            kind="info",
         )
-        msg = await ch.send(embed=emb, view=view)
-        await update_guild_cfg(interaction.guild.id, verify_panel_message_id=msg.id)
-        return await reply_success(interaction, f"✅ Panel erneut gepostet in {ch.mention}.", ephemeral=True)
 
+    def _make_challenge_embed(self, code: str) -> discord.Embed:
+        # ephemere Challenge (an einzelne Person), mit „Answer“-Button in der View
+        desc = (
+            "**☘️ Are you human?**\n\n"
+            f"Bitte **diesen Code** exakt eingeben (Groß/Klein egal):\n"
+            f"```\n{code}\n```\n"
+            "• Zeichne keine Linien – einfach nur den Code abtippen.\n"
+            "• Du hast begrenzte Versuche; bei zu vielen Fehlversuchen kurzer Timeout."
+        )
+        return make_embed(description=desc, kind="info")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(VerifyCog(bot))
