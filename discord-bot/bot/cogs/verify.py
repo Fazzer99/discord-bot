@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import random
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
@@ -12,7 +12,7 @@ from discord.ext import commands
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..utils.checks import require_manage_guild
 from ..utils.replies import make_embed, reply_success, reply_error
-from ..db import fetchrow, execute  # <-- NEU: DB-Helfer nutzen
+from ..db import fetchrow, execute  # <-- DB-Helfer nutzen
 
 VERIFY_SETTINGS_KEY = "verify"
 
@@ -252,17 +252,19 @@ class VerifyCog(commands.Cog):
             view = AnswerView(self, key)
             return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
-        # Korrekt -> in DB markieren (idempotent dank PK)
+        # ✅ Korrekt -> in DB markieren
         self.challenges.pop(key, None)
-        # Lokale Zeit berechnen basierend auf guild_settings.tz
+
+        # Lokale Zeit berechnen basierend auf guild_settings.tz (in Minuten)
         cfg = await get_guild_cfg(guild.id)
         try:
             tz_minutes = int(str(cfg.get("tz") or "0").strip())
         except Exception:
             tz_minutes = 0
 
-        utc_now = datetime.now(timezone.utc)
-        local_now = (utc_now + timedelta(minutes=tz_minutes)).replace(tzinfo=None)  # naive lokale Zeit
+        # naive UTC-Zeit + Offset
+        utc_now = datetime.utcnow()            # naive UTC
+        local_now = utc_now + timedelta(minutes=tz_minutes)  # naive lokal
 
         # Eintrag setzen
         await execute(
@@ -273,6 +275,8 @@ class VerifyCog(commands.Cog):
             """,
             guild.id, user.id, local_now
         )
+
+        await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
 
     # ----------------- Helper -----------------
 
