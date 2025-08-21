@@ -12,7 +12,7 @@ from discord.ext import commands
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..utils.checks import require_manage_guild
 from ..utils.replies import make_embed, reply_success, reply_error
-from ..db import fetchrow, execute  # <-- DB-Helfer nutzen
+from ..db import fetchrow, execute
 
 VERIFY_SETTINGS_KEY = "verify"
 
@@ -243,7 +243,6 @@ class VerifyCog(commands.Cog):
                 self.challenges.pop(key, None)
                 return await interaction.response.send_message("❌ Zu viele Fehlversuche. Bitte kurz warten und neu beginnen.", ephemeral=True)
 
-            # erneuter Versuch möglich
             emb = make_embed(
                 title="❌ Falsche Antwort",
                 description=f"Versuche übrig: **{state['attempts_left']}**",
@@ -255,18 +254,19 @@ class VerifyCog(commands.Cog):
         # ✅ Korrekt -> in DB markieren
         self.challenges.pop(key, None)
 
-        # Lokale Zeit berechnen basierend auf guild_settings.tz (in Minuten)
+        # --- Lokale Zeit aus UTC + tz (Minuten) berechnen ---
         cfg = await get_guild_cfg(guild.id)
         try:
             tz_minutes = int(str(cfg.get("tz") or "0").strip())
         except Exception:
             tz_minutes = 0
+        # Sicherheitsbegrenzung: -840..+840 (±14 Stunden)
+        tz_minutes = max(-840, min(840, tz_minutes))
 
-        # naive UTC-Zeit + Offset
-        utc_now = datetime.utcnow()            # naive UTC
-        local_now = utc_now + timedelta(minutes=tz_minutes)  # naive lokal
+        utc_now = datetime.utcnow()  # naive UTC
+        local_now = utc_now + timedelta(minutes=tz_minutes)  # naive lokale Zeit
 
-        # Eintrag setzen
+        # Eintrag setzen (timestamp without time zone -> exakt wie übergeben)
         await execute(
             """
             INSERT INTO public.verify_passed (guild_id, user_id, passed_at)
@@ -276,7 +276,17 @@ class VerifyCog(commands.Cog):
             guild.id, user.id, local_now
         )
 
-        await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
+        # Mini-Debug für Admins/Tester sichtbar machen
+        try:
+            await interaction.response.send_message(
+                f"🎉 Verifizierung erfolgreich – willkommen!\n"
+                f"Debug: tz={tz_minutes} min, utc_now={utc_now:%Y-%m-%d %H:%M:%S}, "
+                f"saved_local={local_now:%Y-%m-%d %H:%M:%S}",
+                ephemeral=True,
+            )
+        except Exception:
+            # falls already responded (sollte nicht passieren)
+            pass
 
     # ----------------- Helper -----------------
 
@@ -294,7 +304,6 @@ class VerifyCog(commands.Cog):
         )
 
     def _make_challenge_embed(self, code: str) -> discord.Embed:
-        # ephemere Challenge (an einzelne Person), mit „Answer“-Button in der View
         desc = (
             "**☘️ Are you human?**\n\n"
             f"Bitte **diesen Code** exakt eingeben (Groß/Klein egal):\n"
