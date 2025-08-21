@@ -11,6 +11,7 @@ from discord.ext import commands
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..utils.checks import require_manage_guild
 from ..utils.replies import make_embed, reply_success, reply_error
+from ..db import fetchrow, execute  # <-- NEU: DB-Helfer nutzen
 
 VERIFY_SETTINGS_KEY = "verify"
 
@@ -187,6 +188,14 @@ class VerifyCog(commands.Cog):
                 "ℹ️ Du bist der Server-Owner – eine Verifizierung ist nicht nötig.", ephemeral=True
             )
 
+        # Schon verifiziert? -> in DB prüfen
+        row = await fetchrow(
+            "SELECT 1 FROM public.verify_passed WHERE guild_id=$1 AND user_id=$2",
+            guild.id, user.id
+        )
+        if row:
+            return await interaction.response.send_message("✅ Du bist bereits verifiziert.", ephemeral=True)
+
         # Cooldown
         now = time.time()
         cd = max(0, int(v.get("cooldown", COOLDOWN_DEFAULT)))
@@ -242,8 +251,16 @@ class VerifyCog(commands.Cog):
             view = AnswerView(self, key)
             return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
-        # Korrekt (ohne Rollenvergabe)
+        # Korrekt -> in DB markieren (idempotent dank PK)
         self.challenges.pop(key, None)
+        await execute(
+            """
+            INSERT INTO public.verify_passed (guild_id, user_id)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id, user_id) DO NOTHING
+            """,
+            guild.id, user.id
+        )
         await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
 
     # ----------------- Helper -----------------
