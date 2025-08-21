@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import random
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # UTC-naiv verwenden
 
 import discord
 from discord import app_commands
@@ -116,7 +116,6 @@ class VerifyCog(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        # aktuelle settings mergen
         cfg = await get_guild_cfg(interaction.guild.id)
         all_settings = (cfg.get("settings") or {}).copy()
 
@@ -189,7 +188,7 @@ class VerifyCog(commands.Cog):
                 "ℹ️ Du bist der Server-Owner – eine Verifizierung ist nicht nötig.", ephemeral=True
             )
 
-        # Schon verifiziert? -> in DB prüfen
+        # Schon verifiziert?
         row = await fetchrow(
             "SELECT 1 FROM public.verify_passed WHERE guild_id=$1 AND user_id=$2",
             guild.id, user.id
@@ -251,42 +250,74 @@ class VerifyCog(commands.Cog):
             view = AnswerView(self, key)
             return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
-        # ✅ Korrekt -> in DB markieren
+        # ✅ korrekt -> Challenge schließen
         self.challenges.pop(key, None)
 
-        # --- Lokale Zeit aus UTC + tz (Minuten) berechnen ---
-        cfg = await get_guild_cfg(guild.id)
-        try:
-            tz_minutes = int(str(cfg.get("tz") or "0").strip())
-        except Exception:
-            tz_minutes = 0
-        # Sicherheitsbegrenzung: -840..+840 (±14 Stunden)
-        tz_minutes = max(-840, min(840, tz_minutes))
-
-        utc_now = datetime.utcnow()  # naive UTC
-        local_now = utc_now + timedelta(minutes=tz_minutes)  # naive lokale Zeit
-
-        # Eintrag setzen (timestamp without time zone -> exakt wie übergeben)
+        # --- WICHTIG: In der DB IMMER UTC (naiv) speichern ---
+        utc_now = datetime.utcnow()  # naive UTC (passt zu 'timestamp without time zone')
         await execute(
             """
             INSERT INTO public.verify_passed (guild_id, user_id, passed_at)
             VALUES ($1, $2, $3)
             ON CONFLICT (guild_id, user_id) DO NOTHING
             """,
-            guild.id, user.id, local_now
+            guild.id, user.id, utc_now
         )
 
-        # Mini-Debug für Admins/Tester sichtbar machen
+        # Für die Rückmeldung an den Nutzer: lokale Serverzeit (tz-Minuten) anzeigen
+        cfg = await get_guild_cfg(guild.id)
         try:
-            await interaction.response.send_message(
-                f"🎉 Verifizierung erfolgreich – willkommen!\n"
-                f"Debug: tz={tz_minutes} min, utc_now={utc_now:%Y-%m-%d %H:%M:%S}, "
-                f"saved_local={local_now:%Y-%m-%d %H:%M:%S}",
-                ephemeral=True,
-            )
+            tz_minutes = int(str(cfg.get("tz") or "0").strip())
         except Exception:
-            # falls already responded (sollte nicht passieren)
-            pass
+            tz_minutes = 0
+        tz_minutes = max(-840, min(840, tz_minutes))  # Sicherheitskorridor
+
+        local_now = utc_now + timedelta(minutes=tz_minutes)
+        await interaction.response.send_message(
+            f"🎉 Verifizierung erfolgreich – willkommen!\n"
+            f"🕒 Zeit (Server-lokal): **{local_now:%d.%m.%Y %H:%M:%S}**",
+            ephemeral=True,
+        )
+
+    # -------- /verify_info --------
+    @app_commands.command(
+        name="verify_info",
+        description="Zeigt, wann ein Mitglied verifiziert wurde (lokale Serverzeit)."
+    )
+    @require_manage_guild()
+    @app_commands.describe(member="Mitglied, dessen Verifizierungszeit angezeigt werden soll")
+    async def verify_info(self, interaction: discord.Interaction, member: discord.Member):
+        row = await fetchrow(
+            "SELECT passed_at FROM public.verify_passed WHERE guild_id=$1 AND user_id=$2",
+            interaction.guild.id, member.id
+        )
+        if not row or not row.get("passed_at"):
+            return await interaction.response.send_message(
+                f"ℹ️ {member.mention} ist **nicht** verifiziert (kein Eintrag gefunden).",
+                ephemeral=True
+            )
+
+        # In DB liegt UTC-naiv. Für Anzeige in lokale Serverzeit umrechnen.
+        passed_utc = row["passed_at"]  # naive UTC
+        cfg = await get_guild_cfg(interaction.guild.id)
+        try:
+            tz_minutes = int(str(cfg.get("tz") or "0").strip())
+        except Exception:
+            tz_minutes = 0
+        tz_minutes = max(-840, min(840, tz_minutes))
+
+        local_time = passed_utc + timedelta(minutes=tz_minutes)
+
+        emb = make_embed(
+            title="🔎 Verify-Info",
+            description=(
+                f"👤 Mitglied: {member.mention}\n"
+                f"🕒 Verifiziert am: **{local_time:%d.%m.%Y %H:%M:%S}** (Server-Zeit)\n"
+                f"↪ gespeichert als UTC: {passed_utc:%Y-%m-%d %H:%M:%S}"
+            ),
+            kind="info",
+        )
+        await interaction.response.send_message(embed=emb, ephemeral=True)
 
     # ----------------- Helper -----------------
 
