@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..utils.checks import require_manage_guild
-from ..utils.replies import make_embed, send_embed, reply_success, reply_error, reply_text
+from ..utils.replies import make_embed, reply_success, reply_error
 
 VERIFY_SETTINGS_KEY = "verify"
 
@@ -64,19 +64,14 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="ignix_verify_help")
     async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        if not guild:
+        if not interaction.guild:
             return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
-        cfg = await get_guild_cfg(guild.id)
-        v = (cfg.get("settings") or {}).get(VERIFY_SETTINGS_KEY) or {}
-        role_id = v.get("role_id")
-        role_mention = f"<@&{role_id}>" if role_id else "`(not set)`"
-
         txt = (
             "🆘 **Verification Help**\n"
-            f"• Press **Verify** to receive the access role {role_mention}.\n"
+            "• Press **Verify** to start.\n"
+            "• Click **Answer** and type the code you see — case doesn’t matter.\n"
             "• If it fails, try again in a few seconds or contact a moderator.\n"
-            "• Owner does not need to verify."
+            "• Server owners don’t need to verify."
         )
         await interaction.response.send_message(txt, ephemeral=True)
 
@@ -91,11 +86,13 @@ class VerifyCog(commands.Cog):
         self.challenges: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
     # -------- /set_verify --------
-    @app_commands.command(name="set_verify", description="Richtet die Verifizierung ein und postet die Verify-Nachricht.")
+    @app_commands.command(
+        name="set_verify",
+        description="Richtet die Verifizierung ein und postet die Verify-Nachricht (ohne Rollenvergabe)."
+    )
     @require_manage_guild()
     @app_commands.describe(
         channel="Kanal, in dem die Verify-Nachricht stehen soll",
-        role="Rolle, die nach der Verifizierung vergeben wird",
         enabled="Feature aktivieren/deaktivieren",
         cooldown_seconds="Schutz vor Spam-Klicks (Standard 5s)",
         attempts="Erlaubte Fehlversuche (Standard 3)",
@@ -107,7 +104,6 @@ class VerifyCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel,
-        role: discord.Role,
         enabled: bool = True,
         cooldown_seconds: int = COOLDOWN_DEFAULT,
         attempts: int = ATTEMPTS_DEFAULT,
@@ -118,16 +114,13 @@ class VerifyCog(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        if role >= interaction.guild.me.top_role:
-            return await reply_error(
-                interaction,
-                "❌ Ich kann diese Rolle nicht vergeben (sie ist gleich/über meiner höchsten Rolle)."
-            )
+        # aktuelle settings mergen
+        cfg = await get_guild_cfg(interaction.guild.id)
+        all_settings = (cfg.get("settings") or {}).copy()
 
-        settings = {
+        verify_settings = {
             "enabled": bool(enabled),
             "channel_id": channel.id,
-            "role_id": role.id,
             "cooldown": max(0, int(cooldown_seconds)),
             "attempts": max(1, int(attempts)),
             "ttl": max(30, int(ttl_seconds)),
@@ -140,10 +133,10 @@ class VerifyCog(commands.Cog):
                 "Click **Verify**, then **Answer** and enter the code."
             ),
         }
-        # nur settings.verify aktualisieren
-        await update_guild_cfg(interaction.guild.id, settings={VERIFY_SETTINGS_KEY: settings})
+        all_settings[VERIFY_SETTINGS_KEY] = verify_settings
+        await update_guild_cfg(interaction.guild.id, settings=all_settings)
 
-        emb = self._make_verify_embed(settings)
+        emb = self._make_verify_embed(verify_settings)
         view = VerifyView(self)
         try:
             await channel.send(embed=emb, view=view)
@@ -154,7 +147,7 @@ class VerifyCog(commands.Cog):
 
         return await reply_success(
             interaction,
-            f"✅ Verify eingerichtet in {channel.mention} (Rolle: {role.mention})."
+            f"✅ Verify eingerichtet in {channel.mention} (ohne Rollenvergabe)."
         )
 
     # -------- /verify_config --------
@@ -164,15 +157,14 @@ class VerifyCog(commands.Cog):
         cfg = await get_guild_cfg(interaction.guild.id)
         v = (cfg.get("settings") or {}).get(VERIFY_SETTINGS_KEY) or {}
         ch = interaction.guild.get_channel(v.get("channel_id") or 0)
-        rl = interaction.guild.get_role(v.get("role_id") or 0)
 
         desc = (
             f"**Aktiv:** {('ja' if v.get('enabled') else 'nein')}\n"
             f"**Kanal:** {ch.mention if isinstance(ch, discord.TextChannel) else '—'}\n"
-            f"**Rolle:** {rl.mention if isinstance(rl, discord.Role) else '—'}\n"
             f"**Cooldown:** {v.get('cooldown', COOLDOWN_DEFAULT)}s\n"
             f"**Attempts:** {v.get('attempts', ATTEMPTS_DEFAULT)}\n"
             f"**TTL:** {v.get('ttl', TTL_DEFAULT)}s\n"
+            f"**Rollenvergabe:** — (deaktiviert)\n"
         )
         emb = make_embed(title="🔐 Verify – Konfiguration", description=desc, kind="info")
         await interaction.response.send_message(embed=emb, ephemeral=True)
@@ -189,20 +181,11 @@ class VerifyCog(commands.Cog):
         if not v.get("enabled"):
             return await interaction.response.send_message("Verification is currently disabled.", ephemeral=True)
 
-        role_id = v.get("role_id")
-        role = guild.get_role(role_id) if role_id else None
-        if role is None:
-            return await interaction.response.send_message("Verify role is not configured.", ephemeral=True)
-
         # Owner braucht keine Verifizierung
         if guild.owner_id == user.id:
             return await interaction.response.send_message(
                 "ℹ️ Du bist der Server-Owner – eine Verifizierung ist nicht nötig.", ephemeral=True
             )
-
-        # Schon verifiziert?
-        if role in user.roles:
-            return await interaction.response.send_message("✅ Du bist bereits verifiziert.", ephemeral=True)
 
         # Cooldown
         now = time.time()
@@ -221,7 +204,6 @@ class VerifyCog(commands.Cog):
             "code": code,
             "expires": now + int(v.get("ttl", TTL_DEFAULT)),
             "attempts_left": int(v.get("attempts", ATTEMPTS_DEFAULT)),
-            "role_id": role.id,
         }
 
         emb = self._make_challenge_embed(code)
@@ -260,21 +242,8 @@ class VerifyCog(commands.Cog):
             view = AnswerView(self, key)
             return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
-        # Korrekt → Rolle vergeben
-        role = guild.get_role(state["role_id"])
+        # Korrekt (ohne Rollenvergabe)
         self.challenges.pop(key, None)
-        if role is None:
-            return await interaction.response.send_message("⚠️ Rolle nicht mehr vorhanden. Bitte melde dich bei einem Mod.", ephemeral=True)
-
-        try:
-            await user.add_roles(role, reason="Ignix Verify (captcha passed)")
-        except discord.Forbidden:
-            return await interaction.response.send_message(
-                "❌ Mir fehlen Rechte, um die Rolle zu vergeben (Rollen-Hierarchie prüfen).", ephemeral=True
-            )
-        except Exception:
-            return await interaction.response.send_message("❌ Unerwarteter Fehler bei der Verifizierung.", ephemeral=True)
-
         await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
 
     # ----------------- Helper -----------------
