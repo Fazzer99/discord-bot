@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import random
 from typing import Optional, Dict, Any, Tuple
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -253,15 +254,25 @@ class VerifyCog(commands.Cog):
 
         # Korrekt -> in DB markieren (idempotent dank PK)
         self.challenges.pop(key, None)
+        # Lokale Zeit berechnen basierend auf guild_settings.tz
+        cfg = await get_guild_cfg(guild.id)
+        try:
+            tz_minutes = int(str(cfg.get("tz") or "0").strip())
+        except Exception:
+            tz_minutes = 0
+
+        utc_now = datetime.now(timezone.utc)
+        local_now = (utc_now + timedelta(minutes=tz_minutes)).replace(tzinfo=None)  # naive lokale Zeit
+
+        # Eintrag setzen
         await execute(
             """
-            INSERT INTO public.verify_passed (guild_id, user_id)
-            VALUES ($1, $2)
+            INSERT INTO public.verify_passed (guild_id, user_id, passed_at)
+            VALUES ($1, $2, $3)
             ON CONFLICT (guild_id, user_id) DO NOTHING
             """,
-            guild.id, user.id
+            guild.id, user.id, local_now
         )
-        await interaction.response.send_message("🎉 Verifizierung erfolgreich – willkommen!", ephemeral=True)
 
     # ----------------- Helper -----------------
 
