@@ -1,9 +1,10 @@
 # bot/cogs/verify.py
 from __future__ import annotations
+import io
 import time
 import random
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta  # UTC-naiv verwenden
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
@@ -14,14 +15,26 @@ from ..utils.checks import require_manage_guild
 from ..utils.replies import make_embed, reply_success, reply_error
 from ..db import fetchrow, execute
 
+# Pillow (für Bild-Captcha) optional
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    _PIL_OK = True
+except Exception:
+    _PIL_OK = False
+
 VERIFY_SETTINGS_KEY = "verify"
 
-# sichere Captcha-Zeichen (ohne 0/O/I/1)
-CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-CAPTCHA_LEN_DEFAULT = 6
-ATTEMPTS_DEFAULT = 3
-COOLDOWN_DEFAULT = 5  # Sekunden
-TTL_DEFAULT = 300     # 5 Min.
+# Zeichen ohne Verwechslungsgefahr (keine 0/O, I/l/1, S/5, B/8 …)
+SAFE_UPPER = "2345679ACDEFGHJKLMNPQRTUVWXYZ"  # ohne O,I,S,B,8,5,0,1
+SAFE_LOWER = "acdefghjkmnpqrtuvwxyz"          # gematcht zu oben (keine l,i,o,s,b)
+SAFE_DIGIT = "234679"
+
+DEFAULT_CODE_LEN = 6
+DEFAULT_ATTEMPTS = 3
+DEFAULT_COOLDOWN = 5     # Sekunden
+DEFAULT_TTL = 300        # 5 Min.
+DEFAULT_MODE = "image"   # "image" | "text"
+DEFAULT_CASE_SENSITIVE = True
 
 # --------------------------- Captcha-Modal ---------------------------
 
@@ -34,7 +47,7 @@ class CaptchaModal(discord.ui.Modal):
             label="Answer",
             placeholder="Type the code here",
             required=True,
-            max_length=16
+            max_length=32
         )
         self.add_item(self.answer)
 
@@ -70,8 +83,7 @@ class VerifyView(discord.ui.View):
             return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
         txt = (
             "🆘 **Verification Help**\n"
-            "• Press **Verify** to start.\n"
-            "• Click **Answer** and type the code you see — case doesn’t matter.\n"
+            "• Press **Verify** to start, then **Answer** to type the code.\n"
             "• If it fails, try again in a few seconds or contact a moderator.\n"
             "• Server owners don’t need to verify."
         )
@@ -82,15 +94,13 @@ class VerifyView(discord.ui.View):
 class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # cooldowns: user_id -> ts
         self.cooldowns: Dict[int, float] = {}
-        # challenges: (guild_id, user_id) -> dict(state)
         self.challenges: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
     # -------- /set_verify --------
     @app_commands.command(
         name="set_verify",
-        description="Richtet die Verifizierung ein und postet die Verify-Nachricht (ohne Rollenvergabe)."
+        description="Richtet die Verifizierung ein und postet die Verify-Nachricht."
     )
     @require_manage_guild()
     @app_commands.describe(
@@ -99,6 +109,9 @@ class VerifyCog(commands.Cog):
         cooldown_seconds="Schutz vor Spam-Klicks (Standard 5s)",
         attempts="Erlaubte Fehlversuche (Standard 3)",
         ttl_seconds="Zeitfenster für einen Captcha (Standard 300s)",
+        code_length=f"Länge des Codes (Standard {DEFAULT_CODE_LEN})",
+        mode='Captcha-Modus: "image" (Standard) oder "text"',
+        case_sensitive="Groß-/Kleinschreibung beachten? (Standard: Ja)",
         message_de="Optional: eigener deutscher Einleitungstext",
         message_en="Optional: eigener englischer Einleitungstext",
     )
@@ -107,15 +120,23 @@ class VerifyCog(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         enabled: bool = True,
-        cooldown_seconds: int = COOLDOWN_DEFAULT,
-        attempts: int = ATTEMPTS_DEFAULT,
-        ttl_seconds: int = TTL_DEFAULT,
+        cooldown_seconds: int = DEFAULT_COOLDOWN,
+        attempts: int = DEFAULT_ATTEMPTS,
+        ttl_seconds: int = DEFAULT_TTL,
+        code_length: int = DEFAULT_CODE_LEN,
+        mode: str = DEFAULT_MODE,
+        case_sensitive: bool = DEFAULT_CASE_SENSITIVE,
         message_de: Optional[str] = None,
         message_en: Optional[str] = None,
     ):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
+        mode = (mode or "").lower().strip()
+        if mode not in ("image", "text"):
+            mode = DEFAULT_MODE
+
+        # existierende Settings mergen
         cfg = await get_guild_cfg(interaction.guild.id)
         all_settings = (cfg.get("settings") or {}).copy()
 
@@ -125,13 +146,16 @@ class VerifyCog(commands.Cog):
             "cooldown": max(0, int(cooldown_seconds)),
             "attempts": max(1, int(attempts)),
             "ttl": max(30, int(ttl_seconds)),
+            "code_length": max(4, min(12, int(code_length))),
+            "mode": mode,
+            "case_sensitive": bool(case_sensitive),
             "message_de": (message_de or "").strip() or (
                 "🔒 **Verifizierung erforderlich!**\n"
-                "Klicke **Verify**, dann **Answer** und gib den Code ein."
+                "Klicke **Verify**, dann **Answer** und gib den Code aus dem Bild ein."
             ),
             "message_en": (message_en or "").strip() or (
                 "🔒 **Verification required!**\n"
-                "Click **Verify**, then **Answer** and enter the code."
+                "Click **Verify**, then **Answer** and enter the code from the image."
             ),
         }
         all_settings[VERIFY_SETTINGS_KEY] = verify_settings
@@ -146,9 +170,13 @@ class VerifyCog(commands.Cog):
         except Exception:
             return await reply_error(interaction, "❌ Konnte die Verify-Nachricht nicht senden.")
 
+        hint = ""
+        if verify_settings["mode"] == "image" and not _PIL_OK:
+            hint = " (Hinweis: Pillow nicht installiert – es wird automatisch Text-Captcha verwendet.)"
+
         return await reply_success(
             interaction,
-            f"✅ Verify eingerichtet in {channel.mention} (ohne Rollenvergabe)."
+            f"✅ Verify eingerichtet in {channel.mention}.{hint}"
         )
 
     # -------- /verify_config --------
@@ -162,10 +190,12 @@ class VerifyCog(commands.Cog):
         desc = (
             f"**Aktiv:** {('ja' if v.get('enabled') else 'nein')}\n"
             f"**Kanal:** {ch.mention if isinstance(ch, discord.TextChannel) else '—'}\n"
-            f"**Cooldown:** {v.get('cooldown', COOLDOWN_DEFAULT)}s\n"
-            f"**Attempts:** {v.get('attempts', ATTEMPTS_DEFAULT)}\n"
-            f"**TTL:** {v.get('ttl', TTL_DEFAULT)}s\n"
-            f"**Rollenvergabe:** — (deaktiviert)\n"
+            f"**Cooldown:** {v.get('cooldown', DEFAULT_COOLDOWN)}s\n"
+            f"**Attempts:** {v.get('attempts', DEFAULT_ATTEMPTS)}\n"
+            f"**TTL:** {v.get('ttl', DEFAULT_TTL)}s\n"
+            f"**Mode:** {v.get('mode', DEFAULT_MODE)}\n"
+            f"**Case sensitive:** {('ja' if v.get('case_sensitive', DEFAULT_CASE_SENSITIVE) else 'nein')}\n"
+            f"**Code length:** {v.get('code_length', DEFAULT_CODE_LEN)}\n"
         )
         emb = make_embed(title="🔐 Verify – Konfiguration", description=desc, kind="info")
         await interaction.response.send_message(embed=emb, ephemeral=True)
@@ -182,7 +212,6 @@ class VerifyCog(commands.Cog):
         if not v.get("enabled"):
             return await interaction.response.send_message("Verification is currently disabled.", ephemeral=True)
 
-        # Owner braucht keine Verifizierung
         if guild.owner_id == user.id:
             return await interaction.response.send_message(
                 "ℹ️ Du bist der Server-Owner – eine Verifizierung ist nicht nötig.", ephemeral=True
@@ -198,7 +227,7 @@ class VerifyCog(commands.Cog):
 
         # Cooldown
         now = time.time()
-        cd = max(0, int(v.get("cooldown", COOLDOWN_DEFAULT)))
+        cd = max(0, int(v.get("cooldown", DEFAULT_COOLDOWN)))
         until = self.cooldowns.get(user.id, 0.0)
         if now < until:
             return await interaction.response.send_message(
@@ -206,18 +235,36 @@ class VerifyCog(commands.Cog):
             )
         self.cooldowns[user.id] = now + cd
 
-        # Challenge generieren und ephemer posten
-        code = self._gen_code(CAPTCHA_LEN_DEFAULT)
+        # Challenge generieren
+        code_len = int(v.get("code_length", DEFAULT_CODE_LEN))
+        case_sensitive = bool(v.get("case_sensitive", DEFAULT_CASE_SENSITIVE))
+        code = self._gen_code(code_len, case_sensitive)
+
         key = (guild.id, user.id)
         self.challenges[key] = {
-            "code": code,
-            "expires": now + int(v.get("ttl", TTL_DEFAULT)),
-            "attempts_left": int(v.get("attempts", ATTEMPTS_DEFAULT)),
+            "code": code,                    # exakt wie generiert (ggf. gemischt)
+            "case_sensitive": case_sensitive,
+            "expires": now + int(v.get("ttl", DEFAULT_TTL)),
+            "attempts_left": int(v.get("attempts", DEFAULT_ATTEMPTS)),
+            "mode": v.get("mode", DEFAULT_MODE),
         }
 
-        emb = self._make_challenge_embed(code)
-        view = AnswerView(self, key)
-        await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
+        mode = self.challenges[key]["mode"]
+        if mode == "image" and _PIL_OK:
+            fobj = self._make_image_captcha(code)
+            emb = make_embed(
+                title="☘️ Are you human?",
+                description=("Tip: Beachte Groß/Kleinschreibung." if case_sensitive
+                             else "Hinweis: Groß/Kleinschreibung ist egal."),
+                kind="info",
+            )
+            view = AnswerView(self, key)
+            await interaction.response.send_message(embed=emb, file=fobj, view=view, ephemeral=True)
+        else:
+            # Text-Fallback
+            emb = self._make_text_challenge_embed(code, case_sensitive)
+            view = AnswerView(self, key)
+            await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
     # -------- Modal-Validierung --------
     async def validate_captcha_answer(self, interaction: discord.Interaction, key: Tuple[int, int], answer: str):
@@ -230,13 +277,17 @@ class VerifyCog(commands.Cog):
         if not state:
             return await interaction.response.send_message("❌ Challenge abgelaufen. Bitte erneut **Verify** klicken.", ephemeral=True)
 
-        # Ablauf prüfen
         if time.time() > state["expires"]:
             self.challenges.pop(key, None)
             return await interaction.response.send_message("⌛ Challenge abgelaufen. Bitte erneut **Verify** klicken.", ephemeral=True)
 
-        # Antwort prüfen (case-insensitive)
-        if (answer or "").strip().upper() != state["code"]:
+        expected = state["code"]
+        case_sensitive = state.get("case_sensitive", True)
+        given = (answer or "").strip()
+
+        ok = (given == expected) if case_sensitive else (given.upper() == expected.upper())
+
+        if not ok:
             state["attempts_left"] -= 1
             if state["attempts_left"] <= 0:
                 self.challenges.pop(key, None)
@@ -250,11 +301,9 @@ class VerifyCog(commands.Cog):
             view = AnswerView(self, key)
             return await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
-        # ✅ korrekt -> Challenge schließen
+        # ✅ korrekt -> Eintrag in UTC speichern (naiv)
         self.challenges.pop(key, None)
-
-        # --- WICHTIG: In der DB IMMER UTC (naiv) speichern ---
-        utc_now = datetime.utcnow()  # naive UTC (passt zu 'timestamp without time zone')
+        utc_now = datetime.utcnow()
         await execute(
             """
             INSERT INTO public.verify_passed (guild_id, user_id, passed_at)
@@ -264,15 +313,15 @@ class VerifyCog(commands.Cog):
             guild.id, user.id, utc_now
         )
 
-        # Für die Rückmeldung an den Nutzer: lokale Serverzeit (tz-Minuten) anzeigen
+        # lokale Anzeige
         cfg = await get_guild_cfg(guild.id)
         try:
             tz_minutes = int(str(cfg.get("tz") or "0").strip())
         except Exception:
             tz_minutes = 0
-        tz_minutes = max(-840, min(840, tz_minutes))  # Sicherheitskorridor
-
+        tz_minutes = max(-840, min(840, tz_minutes))
         local_now = utc_now + timedelta(minutes=tz_minutes)
+
         await interaction.response.send_message(
             f"🎉 Verifizierung erfolgreich – willkommen!\n"
             f"🕒 Zeit (Server-lokal): **{local_now:%d.%m.%Y %H:%M:%S}**",
@@ -297,7 +346,6 @@ class VerifyCog(commands.Cog):
                 ephemeral=True
             )
 
-        # In DB liegt UTC-naiv. Für Anzeige in lokale Serverzeit umrechnen.
         passed_utc = row["passed_at"]  # naive UTC
         cfg = await get_guild_cfg(interaction.guild.id)
         try:
@@ -305,7 +353,6 @@ class VerifyCog(commands.Cog):
         except Exception:
             tz_minutes = 0
         tz_minutes = max(-840, min(840, tz_minutes))
-
         local_time = passed_utc + timedelta(minutes=tz_minutes)
 
         emb = make_embed(
@@ -321,8 +368,10 @@ class VerifyCog(commands.Cog):
 
     # ----------------- Helper -----------------
 
-    def _gen_code(self, length: int) -> str:
-        return "".join(random.choice(CAPTCHA_CHARS) for _ in range(length))
+    def _gen_code(self, length: int, case_sensitive: bool) -> str:
+        """Gemischter Code: Ziffern + (ggf.) Groß/kleinbuchstaben aus 'sicheren' Sets."""
+        alphabet = SAFE_DIGIT + SAFE_UPPER + (SAFE_LOWER if case_sensitive else "")
+        return "".join(random.choice(alphabet) for _ in range(length))
 
     def _make_verify_embed(self, v: Dict[str, Any]) -> discord.Embed:
         de = v.get("message_de") or "🔒 **Verifizierung erforderlich!** Klicke **Verify**."
@@ -334,15 +383,75 @@ class VerifyCog(commands.Cog):
             kind="info",
         )
 
-    def _make_challenge_embed(self, code: str) -> discord.Embed:
+    def _make_text_challenge_embed(self, code: str, case_sensitive: bool) -> discord.Embed:
+        hint = "Beachte Groß/Kleinschreibung." if case_sensitive else "Groß/Kleinschreibung ist egal."
         desc = (
-            "**☘️ Are you human?**\n\n"
-            f"Bitte **diesen Code** exakt eingeben (Groß/Klein egal):\n"
-            f"```\n{code}\n```\n"
-            "• Zeichne keine Linien – einfach nur den Code abtippen.\n"
-            "• Du hast begrenzte Versuche; bei zu vielen Fehlversuchen kurzer Timeout."
+            f"**☘️ Are you human?**\n\n"
+            f"{hint}\n\n"
+            f"**Code:**\n```\n{code}\n```"
         )
         return make_embed(description=desc, kind="info")
+
+    # ----- Bildcaptcha erzeugen (BytesIO -> discord.File) -----
+    def _make_image_captcha(self, code: str) -> discord.File:
+        W, H = 320, 120
+        img = Image.new("RGB", (W, H), (250, 250, 250))
+        draw = ImageDraw.Draw(img)
+
+        # leichte Verlaufs-/Noise-Fläche
+        for _ in range(200):
+            x1 = random.randint(0, W)
+            y1 = random.randint(0, H)
+            r = random.randint(10, 40)
+            c = tuple(random.randint(210, 245) for _ in range(3))
+            draw.ellipse((x1, y1, x1+r, y1+r), fill=c, outline=None)
+
+        # Linien
+        for _ in range(6):
+            c = tuple(random.randint(120, 180) for _ in range(3))
+            pts = [(random.randint(0, W), random.randint(0, H)) for __ in range(3)]
+            draw.line(pts, fill=c, width=random.randint(2, 4))
+
+        # Schrift (Fallback: default bitmap)
+        try:
+            font = ImageFont.truetype("arial.ttf", 48)
+        except Exception:
+            font = ImageFont.load_default()
+
+        # Zeichen einzeln, random rotiert/versetzt
+        spacing = W // (len(code) + 1)
+        x = spacing // 2
+        for ch in code:
+            angle = random.uniform(-25, 25)
+            scale = random.uniform(0.9, 1.2)
+            color = (random.randint(20, 60), random.randint(20, 60), random.randint(20, 60))
+
+            # einzelnes Zeichen auf separatem Layer zeichnen
+            tmp = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            tdraw = ImageDraw.Draw(tmp)
+            size = int(56 * scale)
+            try:
+                f2 = ImageFont.truetype("arial.ttf", size)
+            except Exception:
+                f2 = ImageFont.load_default()
+
+            w, h = tdraw.textlength(ch, font=f2), size
+            tx = x + random.randint(-10, 10)
+            ty = H//2 - h//2 + random.randint(-10, 10)
+            tdraw.text((tx, ty), ch, font=f2, fill=color)
+
+            tmp = tmp.rotate(angle, resample=Image.BICUBIC, center=(tx+w/2, ty+h/2))
+            img.alpha_composite(tmp)
+            x += spacing
+
+        # mehr Rauschen
+        img = img.filter(ImageFilter.SMOOTH)
+
+        bio = io.BytesIO()
+        img.convert("RGB").save(bio, format="PNG", optimize=True)
+        bio.seek(0)
+        return discord.File(bio, filename="captcha.png")
+        
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(VerifyCog(bot))
