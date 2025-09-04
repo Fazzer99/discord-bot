@@ -25,22 +25,21 @@ def _save_features(features: list[tuple[str, str]]) -> None:
 
 
 class OwnerToolsCog(commands.Cog):
-    """Sammel-Cog für Owner-only Werkzeuge (Serverliste, Feature-Pflege, …)."""
+    """Owner-only Werkzeuge (Serverliste, Feature-Pflege)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ----------------------------- Owner-Guard -----------------------------
     async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != settings.owner_id:
             await reply_text(interaction, "❌ Nur der Bot-Owner darf diesen Befehl nutzen.", kind="error", ephemeral=True)
             return False
         return True
 
-    # ----------------------------- /bot_guilds -----------------------------
+    # ───────────────────────── /bot_guilds ─────────────────────────
     @app_commands.command(name="bot_guilds", description="(Owner) Liste aller Server: Name + ID.")
     @app_commands.describe(query="Optional: Filter (Teil vom Servernamen)")
-    async def bot_guilds(self, interaction: discord.Interaction, query: str | None = None):
+    async def list_bot_guilds(self, interaction: discord.Interaction, query: str | None = None):
         if not await self._ensure_owner(interaction):
             return
 
@@ -55,12 +54,12 @@ class OwnerToolsCog(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        # In Embeds paginieren (Discord-Limits)
+        # In Embeds paginieren
         pages: list[list[str]] = []
         cur: list[str] = []
         cur_len = 0
         for line in lines:
-            if cur_len + len(line) + 1 > 3900 or len(cur) >= 60:  # etwas Puffer
+            if cur_len + len(line) + 1 > 3900 or len(cur) >= 60:
                 pages.append(cur)
                 cur, cur_len = [], 0
             cur.append(line)
@@ -79,7 +78,7 @@ class OwnerToolsCog(commands.Cog):
             emb = discord.Embed(title=title + f" – Seite {i+1}", description="\n".join(pages[i]), color=discord.Color.blurple())
             await interaction.followup.send(embed=emb, ephemeral=True)
 
-    # ----------------------------- /add_feature ----------------------------
+    # ───────────────────────── /add_feature ────────────────────────
     @app_commands.command(name="add_feature", description="(Owner) Feature zur Liste hinzufügen")
     @app_commands.describe(name="Feature-Name", description="Beschreibung (Markdown erlaubt)")
     async def add_feature(self, interaction: discord.Interaction, name: str, description: str):
@@ -93,8 +92,7 @@ class OwnerToolsCog(commands.Cog):
         features.append((name, description))
         _save_features(features)
 
-        # Optional: GitHub Commit (best effort)
-        ok = await commit_features_json(features)
+        ok = await commit_features_json(features)  # best-effort
         note = " (Git commit ✓)" if ok else ""
         await reply_text(interaction, f"✅ Feature `{name}` hinzugefügt{note}.", kind="success", ephemeral=True)
 
