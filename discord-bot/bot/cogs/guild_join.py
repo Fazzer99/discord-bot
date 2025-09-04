@@ -7,7 +7,7 @@ from discord.ext import commands
 from ..utils.replies import reply_text, make_embed, send_embed
 from ..services.features import load_features  # <- wie in deinem Code verwendet
 
-SETUP_CHANNEL_NAME = "fazzers-bot-setup"
+SETUP_CHANNEL_NAME = "ignix-bot-setup"
 
 class GuildJoinCog(commands.Cog):
     def __init__(self, bot: commands.Bot):

@@ -21,6 +21,7 @@ EXTENSIONS = [
     "bot.cogs.vc_tracking_simple",
     "bot.cogs.verify",
     "bot.cogs.welcome_leave",
+    "bot.cogs.owner_tools",
 ]
 
 # Basic logging (Railway-Logs)
