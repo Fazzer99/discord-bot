@@ -9,6 +9,20 @@ from ..services.features import load_features  # <- wie in deinem Code verwendet
 from ..db import fetchrow  # <- NEU: DB-Check für bot_bans
 
 SETUP_CHANNEL_NAME = "ignix-bot-setup"
+SUPPORT_INVITE_URL = "https://discord.gg/YYkpE7fnnv"
+
+
+class SupportView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Button(
+                label="Support",
+                style=discord.ButtonStyle.link,
+                url=SUPPORT_INVITE_URL,
+            )
+        )
+
 
 class GuildJoinCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -58,6 +72,42 @@ class GuildJoinCog(commands.Cog):
 
         if not setup_channel:
             return  # gar kein sendbarer Kanal gefunden
+
+        # 2a) NEU: DM an den Server-Owner (immer Englisch), mit Support-Button
+        owner = guild.owner
+        if owner is None and guild.owner_id:
+            try:
+                owner = await guild.fetch_member(guild.owner_id)
+            except Exception:
+                owner = None
+
+        if owner is not None:
+            bot_name = self.bot.user.name if self.bot.user else "Ignix"
+            emb = make_embed(
+                title=f"Thank you for choosing {bot_name}!",
+                description=(
+                    f"✅ **{bot_name}** has been added to **{guild.name}** successfully!\n\n"
+                    "You can set up the bot using `/onboard`:\n"
+                    "• `/onboard lang:de` or `/onboard lang:en`\n"
+                    "• `/onboard tz:UTC+2` (quarter-hour steps supported)\n\n"
+                    "If you need help or have questions, click **Support** below."
+                ),
+                kind="success",
+            )
+            try:
+                await owner.send(embed=emb, view=SupportView())
+            except discord.Forbidden:
+                # Fallback: DM nicht möglich → Hinweis im Setup-Kanal
+                try:
+                    await reply_text(
+                        setup_channel,
+                        "I couldn't DM the server owner. If you need help, use the Support button:",
+                        kind="warning",
+                    )
+                    # Button als separate Nachricht posten
+                    await setup_channel.send(view=SupportView())
+                except Exception:
+                    pass
 
         # 3) Intro: jetzt Onboarding statt setlang
         intro_msg = (
@@ -119,6 +169,7 @@ class GuildJoinCog(commands.Cog):
 
             # rest senden
             await _flush()
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(GuildJoinCog(bot))
