@@ -220,34 +220,18 @@ class ModerationCog(commands.Cog):
 
         # Für Scheduling: in UTC umrechnen
         run_at_utc = self._local_to_utc(local_run, tz_minutes)
-        delay = max(0, (run_at_utc - now_utc).total_seconds())
 
-        # Templates
-        tmpl_lock = (cfg.get("templates") or {}).get(
-            "lock",
-            "🔒 Kanal {channel} gesperrt um {time} für {duration} Minuten 🚫"
-        )
         display_time = local_run.strftime("%H:%M")
-
         scheduled_mentions: list[str] = []
 
         for ch in sel:
-            # Vorherige Task abbrechen
+            # vorhandene In-Memory-Tasks abbrechen (sollten wir nicht mehr nutzen)
             if ch.id in lock_tasks:
                 try:
                     lock_tasks[ch.id].cancel()
                 except Exception:
                     pass
                 lock_tasks.pop(ch.id, None)
-
-            everyone = interaction.guild.default_role
-            priv_over = ch.overwrites_for(everyone)
-            is_priv = (priv_over.view_channel is False)
-            private_roles: list[discord.Role] = []
-            if is_priv:
-                for role_obj, over in ch.overwrites.items():
-                    if isinstance(role_obj, discord.Role) and over.view_channel:
-                        private_roles.append(role_obj)
 
             # Persistenten Job speichern/überschreiben
             await execute(
@@ -265,35 +249,19 @@ class ModerationCog(commands.Cog):
                 interaction.guild.id, ch.id, run_at_utc, int(duration), interaction.user.id
             )
 
-            async def _do_lock(target_ch: discord.TextChannel | discord.VoiceChannel, wait: float, dur_min: int):
-                # Laufzeit-Lock (nur als Fallback, falls der Scheduler noch nicht getriggert hat)
-                await asyncio.sleep(wait)
-                await self._apply_lock(target_ch)
-                msg_de = tmpl_lock.format(channel=target_ch.mention, time=display_time, duration=dur_min)
-                msg = await translate_text_for_guild(interaction.guild.id, msg_de)
-                emb = make_embed(title="🔒 Lock aktiviert", description=msg, kind="warning")
-                try:
-                    await target_ch.send(embed=emb)
-                except Exception:
-                    pass
-
-                # Unlock nach Dauer (nur falls Scheduler nicht übernimmt)
-                await asyncio.sleep(dur_min * 60)
-                await self._apply_unlock(target_ch)
-                text_unlocked = await translate_text_for_guild(
-                    interaction.guild.id,
-                    "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉"
+            # Wenn Start binnen 5s fällig ist -> sofort ausführen (einmalig) und Job auf running setzen
+            if (run_at_utc - now_utc).total_seconds() <= 5:
+                await self._apply_lock(ch)
+                await self._notify_locked(ch, interaction.guild.id, display_time="jetzt", duration=duration)
+                await execute(
+                    """
+                    UPDATE public.lock_jobs
+                    SET status='running', started_at=$3, ends_at=$4
+                    WHERE guild_id=$1 AND channel_id=$2
+                    """,
+                    interaction.guild.id, ch.id, now_utc, now_utc + timedelta(minutes=duration)
                 )
-                emb_un = make_embed(title="🔓 Unlock", description=text_unlocked, kind="success")
-                try:
-                    await target_ch.send(embed=emb_un)
-                except Exception:
-                    pass
-                lock_tasks.pop(target_ch.id, None)
 
-            # Optionaler In-Memory-Fallback (Scheduler macht es „richtig“ & persistent)
-            task = self.bot.loop.create_task(_do_lock(ch, delay, duration))
-            lock_tasks[ch.id] = task
             scheduled_mentions.append(ch.mention)
 
         # Bestätigung
@@ -356,7 +324,7 @@ class ModerationCog(commands.Cog):
         unlocked_mentions: list[str] = []
 
         for ch in targets:
-            # Laufende Task abbrechen
+            # Laufende (alte) In-Memory-Tasks abbrechen (zur Sicherheit)
             if ch.id in lock_tasks:
                 try:
                     lock_tasks[ch.id].cancel()
