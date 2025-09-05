@@ -9,7 +9,7 @@ from discord.ext import commands
 from ..config import settings
 from ..utils.replies import reply_text
 from ..services.git_features import commit_features_json  # optionaler Git-Commit
-from ..db import fetch, fetchrow, execute  # ← NEU: DB-Helfer für Bans
+from ..db import fetch, fetchrow, execute  # DB-Helfer für Bans
 
 FEATURES_PATH = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
@@ -178,7 +178,7 @@ class OwnerToolsCog(commands.Cog):
     # /bot_ban – Guild dauerhaft sperren (und ggf. sofort verlassen)
     @app_commands.command(name="bot_ban", description="(Owner) Bannt eine Guild dauerhaft (Bot kann nicht mehr hinzugefügt werden).")
     @app_commands.describe(guild_id="Guild-ID", reason="Optionaler Grund")
-    async def bot_ban(self, interaction: discord.Interaction, guild_id: str, reason: str | None = None):
+    async def ban_guild(self, interaction: discord.Interaction, guild_id: str, reason: str | None = None):
         if not await self._ensure_owner(interaction):
             return
 
@@ -223,7 +223,7 @@ class OwnerToolsCog(commands.Cog):
     # /bot_unban – Ban wieder entfernen
     @app_commands.command(name="bot_unban", description="(Owner) Entfernt den permanenten Ban einer Guild.")
     @app_commands.describe(guild_id="Guild-ID")
-    async def bot_unban(self, interaction: discord.Interaction, guild_id: str):
+    async def unban_guild(self, interaction: discord.Interaction, guild_id: str):
         if not await self._ensure_owner(interaction):
             return
 
@@ -235,13 +235,12 @@ class OwnerToolsCog(commands.Cog):
         except ValueError:
             return await reply_text(interaction, "❌ Ungültige Guild-ID (keine Zahl).", kind="error", ephemeral=True)
 
-        deleted = await execute("DELETE FROM public.bot_bans WHERE guild_id=$1", gid)
-        # execute() gibt bei dir wahrscheinlich None zurück; wir antworten einfach freundlich:
+        await execute("DELETE FROM public.bot_bans WHERE guild_id=$1", gid)
         return await reply_text(interaction, f"✅ Guild `{gid}` ist nicht länger gebannt.", kind="success", ephemeral=True)
 
     # /bot_bans – Liste der aktuell gebannten Guilds
     @app_commands.command(name="bot_bans", description="(Owner) Zeigt die Liste permanent gebannter Guilds.")
-    async def bot_bans(self, interaction: discord.Interaction):
+    async def list_bans(self, interaction: discord.Interaction):
         if not await self._ensure_owner(interaction):
             return
 
