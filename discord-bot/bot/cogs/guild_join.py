@@ -5,21 +5,40 @@ import discord
 from discord.ext import commands
 
 from ..utils.replies import reply_text, make_embed, send_embed
-from ..services.features import load_features  # <- wie in deinem Code verwendet
-from ..db import fetchrow  # <- NEU: DB-Check für bot_bans
+from ..services.features import load_features
+from ..db import fetchrow
 
 SETUP_CHANNEL_NAME = "ignix-bot-setup"
 SUPPORT_INVITE_URL = "https://discord.gg/YYkpE7fnnv"
+TOPGG_PAGE_URL = "https://top.gg/bot/1387561449592848454"
+TOPGG_VOTE_URL = "https://top.gg/bot/1387561449592848454/vote"
 
 
-class SupportView(discord.ui.View):
+class WelcomeView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        # Support button
         self.add_item(
             discord.ui.Button(
                 label="Support",
                 style=discord.ButtonStyle.link,
                 url=SUPPORT_INVITE_URL,
+            )
+        )
+        # Vote button
+        self.add_item(
+            discord.ui.Button(
+                label="Vote",
+                style=discord.ButtonStyle.link,
+                url=TOPGG_VOTE_URL,
+            )
+        )
+        # Review button
+        self.add_item(
+            discord.ui.Button(
+                label="Review",
+                style=discord.ButtonStyle.link,
+                url=TOPGG_PAGE_URL,
             )
         )
 
@@ -30,7 +49,7 @@ class GuildJoinCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        # 0) Sofortiger Ban-Check: steht die Guild in public.bot_bans?
+        # 0) Ban-Check
         try:
             banned = await fetchrow(
                 "SELECT reason FROM public.bot_bans WHERE guild_id=$1",
@@ -40,7 +59,6 @@ class GuildJoinCog(commands.Cog):
             banned = None
 
         if banned:
-            # Optional: leises Verlassen ohne Nachricht
             try:
                 await guild.leave()
             except Exception:
@@ -52,7 +70,6 @@ class GuildJoinCog(commands.Cog):
         if not features:
             features_text = "Keine Features eingetragen."
         else:
-            # Nur falls du das noch als zusammenhängenden Text brauchst
             features_text = ""
             for name, desc in features:
                 features_text += f"• **{name}**\n{desc.replace('\\n', '\\n')}\n\n"
@@ -62,18 +79,17 @@ class GuildJoinCog(commands.Cog):
         if setup_channel is None:
             try:
                 setup_channel = await guild.create_text_channel(SETUP_CHANNEL_NAME)
-                await asyncio.sleep(1)  # kleine Pause, damit Kanal bereit ist
+                await asyncio.sleep(1)
             except discord.Forbidden:
-                # Fallback: System-Channel oder erster Channel, in den der Bot schreiben darf
                 setup_channel = (
                     guild.system_channel
                     or next((c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None)
                 )
 
         if not setup_channel:
-            return  # gar kein sendbarer Kanal gefunden
+            return
 
-        # 2a) NEU: DM an den Server-Owner (immer Englisch), mit Support-Button
+        # 2a) DM an den Server-Owner
         owner = guild.owner
         if owner is None and guild.owner_id:
             try:
@@ -90,26 +106,26 @@ class GuildJoinCog(commands.Cog):
                     "You can set up the bot using `/onboard`:\n"
                     "• `/onboard lang:de` or `/onboard lang:en`\n"
                     "• `/onboard tz:UTC+2` (quarter-hour steps supported)\n\n"
-                    "If you need help or have questions, click **Support** below."
+                    "If you need help or have questions, click **Support** below.\n\n"
+                    "💡 If you like the bot, please consider voting or leaving a review on **Top.gg** — "
+                    "it helps us grow and improve! 🚀"
                 ),
                 kind="success",
             )
             try:
-                await owner.send(embed=emb, view=SupportView())
+                await owner.send(embed=emb, view=WelcomeView())
             except discord.Forbidden:
-                # Fallback: DM nicht möglich → Hinweis im Setup-Kanal
                 try:
                     await reply_text(
                         setup_channel,
-                        "I couldn't DM the server owner. If you need help, use the Support button:",
+                        "I couldn't DM the server owner. Here are the Support and Top.gg links:",
                         kind="warning",
                     )
-                    # Button als separate Nachricht posten
-                    await setup_channel.send(view=SupportView())
+                    await setup_channel.send(view=WelcomeView())
                 except Exception:
                     pass
 
-        # 3) Intro: jetzt Onboarding statt setlang
+        # 3) Intro (bestehend)
         intro_msg = (
             f"👋 Danke, dass du mich hinzugefügt hast, **{guild.name}**!\n\n"
             "🧩 **Onboarding (nur Admins):**\n"
@@ -126,21 +142,19 @@ class GuildJoinCog(commands.Cog):
         )
         await reply_text(setup_channel, intro_msg, kind="info")
 
-        # 4) Feature-Liste als Embeds (unverändert)
-        #    - Max 25 Felder pro Embed, 1024 Zeichen pro Field-Value, 6000 Zeichen gesamt
+        # 4) Feature-Liste unverändert …
         if features:
             current_embed = make_embed(
                 title="🧩 Features",
                 kind="info",
             )
             field_count = 0
-            total_chars = len(current_embed.title or "")  # grobe Buchhaltung
+            total_chars = len(current_embed.title or "")
 
             async def _flush():
                 nonlocal current_embed, field_count, total_chars
                 if field_count > 0:
                     await send_embed(setup_channel, current_embed, kind="info")
-                    # reset
                     current_embed = make_embed(title="🧩 Features (fortgesetzt)", kind="info")
                     field_count = 0
                     total_chars = len(current_embed.title or "")
@@ -149,7 +163,6 @@ class GuildJoinCog(commands.Cog):
                 name_str = str(name)
                 value_str = (desc or "").replace("\\n", "\n").strip() or "—"
 
-                # Falls Value > 1024 Zeichen: splitten
                 chunks = []
                 while value_str:
                     chunk = value_str[:1024]
@@ -159,15 +172,13 @@ class GuildJoinCog(commands.Cog):
                 for idx, chunk in enumerate(chunks):
                     field_name = name_str if idx == 0 else f"{name_str} (…)"
                     projected_chars = total_chars + len(field_name) + len(chunk)
-                    # Wenn wir Limits sprengen würden, sende das aktuelle Embed und starte ein neues
-                    if field_count >= 24 or projected_chars >= 5800:  # Puffer
+                    if field_count >= 24 or projected_chars >= 5800:
                         await _flush()
 
                     current_embed.add_field(name=field_name, value=chunk, inline=False)
                     field_count += 1
                     total_chars += len(field_name) + len(chunk)
 
-            # rest senden
             await _flush()
 
 
