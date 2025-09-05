@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from ..utils.replies import reply_text, make_embed, send_embed
 from ..services.features import load_features  # <- wie in deinem Code verwendet
+from ..db import fetchrow  # <- NEU: DB-Check für bot_bans
 
 SETUP_CHANNEL_NAME = "ignix-bot-setup"
 
@@ -15,6 +16,23 @@ class GuildJoinCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
+        # 0) Sofortiger Ban-Check: steht die Guild in public.bot_bans?
+        try:
+            banned = await fetchrow(
+                "SELECT reason FROM public.bot_bans WHERE guild_id=$1",
+                guild.id
+            )
+        except Exception:
+            banned = None
+
+        if banned:
+            # Optional: leises Verlassen ohne Nachricht
+            try:
+                await guild.leave()
+            except Exception:
+                pass
+            return
+
         # 1) Features laden
         features = load_features()
         if not features:

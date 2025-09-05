@@ -9,6 +9,7 @@ from discord.ext import commands
 from ..config import settings
 from ..utils.replies import reply_text
 from ..services.git_features import commit_features_json  # optionaler Git-Commit
+from ..db import fetch, fetchrow, execute  # ← NEU: DB-Helfer für Bans
 
 FEATURES_PATH = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
@@ -27,7 +28,7 @@ def _save_features(features: list[tuple[str, str]]) -> None:
 
 
 class OwnerToolsCog(commands.Cog):
-    """Owner-only Werkzeuge (Serverliste, Feature-Pflege, Bot verlassen lassen)."""
+    """Owner-only Werkzeuge (Serverliste, Feature-Pflege, Bot verlassen lassen, permanente Bot-Bans)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -172,6 +173,123 @@ class OwnerToolsCog(commands.Cog):
         if reason:
             msg += f"\nNotiz: {reason}"
         await reply_text(interaction, msg, kind="success", ephemeral=True)
+
+    # ───────────────────────── Permanente Bot-Bans ─────────────────────────
+    # /bot_ban – Guild dauerhaft sperren (und ggf. sofort verlassen)
+    @app_commands.command(name="bot_ban", description="(Owner) Bannt eine Guild dauerhaft (Bot kann nicht mehr hinzugefügt werden).")
+    @app_commands.describe(guild_id="Guild-ID", reason="Optionaler Grund")
+    async def bot_ban(self, interaction: discord.Interaction, guild_id: str, reason: str | None = None):
+        if not await self._ensure_owner(interaction):
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            return await reply_text(interaction, "❌ Ungültige Guild-ID (keine Zahl).", kind="error", ephemeral=True)
+
+        # Bereits gebannt?
+        existing = await fetchrow("SELECT guild_id FROM public.bot_bans WHERE guild_id=$1", gid)
+        if existing:
+            # Nur Grund (reason) aktualisieren, falls angegeben
+            if reason:
+                await execute("UPDATE public.bot_bans SET reason=$2 WHERE guild_id=$1", gid, reason)
+                return await reply_text(interaction, f"✅ Guild `{gid}` war bereits gebannt – Grund aktualisiert.", kind="success", ephemeral=True)
+            return await reply_text(interaction, f"ℹ️ Guild `{gid}` ist bereits gebannt.", ephemeral=True)
+
+        # Neu eintragen
+        await execute(
+            "INSERT INTO public.bot_bans (guild_id, reason) VALUES ($1, $2)",
+            gid, (reason or None)
+        )
+
+        # Falls der Bot aktuell drin ist: sofort verlassen
+        g = self.bot.get_guild(gid)
+        if g:
+            try:
+                await g.leave()
+            except Exception:
+                pass
+
+        return await reply_text(
+            interaction,
+            f"✅ Guild `{gid}` dauerhaft gebannt.{f' Grund: {reason}' if reason else ''}",
+            kind="success",
+            ephemeral=True,
+        )
+
+    # /bot_unban – Ban wieder entfernen
+    @app_commands.command(name="bot_unban", description="(Owner) Entfernt den permanenten Ban einer Guild.")
+    @app_commands.describe(guild_id="Guild-ID")
+    async def bot_unban(self, interaction: discord.Interaction, guild_id: str):
+        if not await self._ensure_owner(interaction):
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            return await reply_text(interaction, "❌ Ungültige Guild-ID (keine Zahl).", kind="error", ephemeral=True)
+
+        deleted = await execute("DELETE FROM public.bot_bans WHERE guild_id=$1", gid)
+        # execute() gibt bei dir wahrscheinlich None zurück; wir antworten einfach freundlich:
+        return await reply_text(interaction, f"✅ Guild `{gid}` ist nicht länger gebannt.", kind="success", ephemeral=True)
+
+    # /bot_bans – Liste der aktuell gebannten Guilds
+    @app_commands.command(name="bot_bans", description="(Owner) Zeigt die Liste permanent gebannter Guilds.")
+    async def bot_bans(self, interaction: discord.Interaction):
+        if not await self._ensure_owner(interaction):
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        rows = await fetch(
+            "SELECT guild_id, reason, created_at FROM public.bot_bans ORDER BY created_at DESC LIMIT 200"
+        )
+        if not rows:
+            return await reply_text(interaction, "ℹ️ Es sind aktuell **keine** Guilds gebannt.", ephemeral=True)
+
+        lines: list[str] = []
+        for r in rows:
+            gid = r.get("guild_id")
+            reason = r.get("reason") or "—"
+            created = r.get("created_at")
+            # Wenn der Bot die Guild aktuell kennt, Name anzeigen
+            g = self.bot.get_guild(int(gid)) if gid is not None else None
+            name = g.name if g else "?"
+            if created:
+                lines.append(f"• **{name}** — `{gid}` • Grund: {reason} • seit: {created}")
+            else:
+                lines.append(f"• **{name}** — `{gid}` • Grund: {reason}")
+
+        # Chunken, um Embed-Limits einzuhalten
+        pages: list[list[str]] = []
+        cur: list[str] = []
+        cur_len = 0
+        for line in lines:
+            if cur_len + len(line) + 1 > 3900 or len(cur) >= 60:
+                pages.append(cur)
+                cur, cur_len = [], 0
+            cur.append(line)
+            cur_len += len(line) + 1
+        if cur:
+            pages.append(cur)
+
+        title = f"🚫 Gebannte Guilds ({len(rows)})"
+        emb = discord.Embed(title=title, description="\n".join(pages[0]), color=discord.Color.red())
+        await interaction.followup.send(embed=emb, ephemeral=True)
+        for i in range(1, len(pages)):
+            emb = discord.Embed(
+                title=title + f" – Seite {i+1}",
+                description="\n".join(pages[i]),
+                color=discord.Color.red(),
+            )
+            await interaction.followup.send(embed=emb, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
