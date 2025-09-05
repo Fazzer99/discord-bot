@@ -6,18 +6,28 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from ..utils.checks import require_manage_channels
 from ..utils.replies import reply_text, make_embed
 from ..services.guild_config import get_guild_cfg
 from ..services.translation import translate_text_for_guild
+from ..db import fetch, execute  # <-- DB für persistente Jobs
 
 lock_tasks: dict[int, asyncio.Task] = {}
+CHECK_INTERVAL = 20  # Sekunden für den Scheduler-Loop
 
 class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # integrierter Scheduler
+        self.scan_lock_jobs.start()
+
+    def cog_unload(self):
+        try:
+            self.scan_lock_jobs.cancel()
+        except Exception:
+            pass
 
     # ----------------------------- Helpers (TZ) -----------------------------
 
@@ -46,6 +56,87 @@ class ModerationCog(commands.Cog):
     def _local_to_utc(dt_local_naive: datetime, tz_minutes: int) -> datetime:
         """Lokale naive Zeit -> UTC-aware."""
         return (dt_local_naive - timedelta(minutes=tz_minutes)).replace(tzinfo=timezone.utc)
+
+    # ------------------------- Permission-Helpers --------------------------
+
+    @staticmethod
+    def _private_info(ch: discord.abc.GuildChannel) -> tuple[bool, list[discord.Role]]:
+        """Ist der Kanal privat? Wenn ja, welche Rollen haben View?"""
+        if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+            return False, []
+        everyone = ch.guild.default_role
+        priv_over = ch.overwrites_for(everyone)
+        is_priv = (priv_over.view_channel is False)
+        private_roles: list[discord.Role] = []
+        if is_priv:
+            for role_obj, over in ch.overwrites.items():
+                if isinstance(role_obj, discord.Role) and over.view_channel:
+                    private_roles.append(role_obj)
+        return is_priv, private_roles
+
+    async def _apply_lock(self, ch: discord.TextChannel | discord.VoiceChannel):
+        """Setzt die Sperre (idempotent)."""
+        everyone = ch.guild.default_role
+        is_priv, private_roles = self._private_info(ch)
+
+        if isinstance(ch, discord.TextChannel):
+            if is_priv:
+                for r in private_roles:
+                    await ch.set_permissions(r, send_messages=False, view_channel=True)
+            else:
+                await ch.set_permissions(everyone, send_messages=False)
+        else:
+            if is_priv:
+                for r in private_roles:
+                    await ch.set_permissions(r, connect=False, speak=False, view_channel=True)
+            else:
+                await ch.set_permissions(everyone, connect=False, speak=False)
+            # vorsichtshalber alle kicken
+            for m in list(ch.members):
+                try:
+                    await m.move_to(None)
+                except Exception:
+                    pass
+
+    async def _apply_unlock(self, ch: discord.TextChannel | discord.VoiceChannel):
+        """Hebt die Sperre auf (idempotent)."""
+        everyone = ch.guild.default_role
+        is_priv, private_roles = self._private_info(ch)
+
+        if isinstance(ch, discord.TextChannel):
+            if is_priv:
+                for r in private_roles:
+                    await ch.set_permissions(r, send_messages=None, view_channel=True)
+            else:
+                await ch.set_permissions(everyone, send_messages=None)
+        else:
+            if is_priv:
+                for r in private_roles:
+                    await ch.set_permissions(r, connect=None, speak=None, view_channel=True)
+            else:
+                await ch.set_permissions(everyone, connect=None, speak=None)
+
+    async def _notify_locked(self, ch: discord.TextChannel | discord.VoiceChannel, guild_id: int, display_time: str, duration: int):
+        cfg = await get_guild_cfg(guild_id)
+        tmpl_lock = (cfg.get("templates") or {}).get(
+            "lock",
+            "🔒 Kanal {channel} gesperrt um {time} für {duration} Minuten 🚫"
+        )
+        msg_de = tmpl_lock.format(channel=ch.mention, time=display_time, duration=duration)
+        msg = await translate_text_for_guild(guild_id, msg_de)
+        emb = make_embed(title="🔒 Lock aktiviert", description=msg, kind="warning")
+        try:
+            await ch.send(embed=emb)
+        except Exception:
+            pass
+
+    async def _notify_unlocked(self, ch: discord.TextChannel | discord.VoiceChannel, guild_id: int):
+        txt = await translate_text_for_guild(guild_id, "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
+        emb_un = make_embed(title="🔓 Unlock", description=txt, kind="success")
+        try:
+            await ch.send(embed=emb_un)
+        except Exception:
+            pass
 
     # -------------------------------- lock ---------------------------------
 
@@ -141,7 +232,7 @@ class ModerationCog(commands.Cog):
         scheduled_mentions: list[str] = []
 
         for ch in sel:
-            # Vorherige Task für diesen Kanal abbrechen
+            # Vorherige Task abbrechen
             if ch.id in lock_tasks:
                 try:
                     lock_tasks[ch.id].cancel()
@@ -150,7 +241,6 @@ class ModerationCog(commands.Cog):
                 lock_tasks.pop(ch.id, None)
 
             everyone = interaction.guild.default_role
-
             priv_over = ch.overwrites_for(everyone)
             is_priv = (priv_over.view_channel is False)
             private_roles: list[discord.Role] = []
@@ -159,63 +249,54 @@ class ModerationCog(commands.Cog):
                     if isinstance(role_obj, discord.Role) and over.view_channel:
                         private_roles.append(role_obj)
 
+            # Persistenten Job speichern/überschreiben
+            await execute(
+                """
+                INSERT INTO public.lock_jobs (guild_id, channel_id, run_at, duration_minutes, created_by, status)
+                VALUES ($1, $2, $3, $4, $5, 'pending')
+                ON CONFLICT (guild_id, channel_id)
+                DO UPDATE SET run_at = EXCLUDED.run_at,
+                              duration_minutes = EXCLUDED.duration_minutes,
+                              created_by = EXCLUDED.created_by,
+                              status = 'pending',
+                              started_at = NULL,
+                              ends_at = NULL
+                """,
+                interaction.guild.id, ch.id, run_at_utc, int(duration), interaction.user.id
+            )
+
             async def _do_lock(target_ch: discord.TextChannel | discord.VoiceChannel, wait: float, dur_min: int):
+                # Laufzeit-Lock (nur als Fallback, falls der Scheduler noch nicht getriggert hat)
                 await asyncio.sleep(wait)
-
-                # Rechte setzen (lock)
-                if isinstance(target_ch, discord.TextChannel):
-                    if is_priv:
-                        for r in private_roles:
-                            await target_ch.set_permissions(r, send_messages=False, view_channel=True)
-                    else:
-                        await target_ch.set_permissions(everyone, send_messages=False)
-                else:
-                    if is_priv:
-                        for r in private_roles:
-                            await target_ch.set_permissions(r, connect=False, speak=False, view_channel=True)
-                    else:
-                        await target_ch.set_permissions(everyone, connect=False, speak=False)
-                    # ggf. alle rausschmeißen
-                    for m in list(target_ch.members):
-                        try:
-                            await m.move_to(None)
-                        except Exception:
-                            pass
-
-                # Info im Kanal (Zeit in lokaler Zeit anzeigen) — als Embed
+                await self._apply_lock(target_ch)
                 msg_de = tmpl_lock.format(channel=target_ch.mention, time=display_time, duration=dur_min)
                 msg = await translate_text_for_guild(interaction.guild.id, msg_de)
                 emb = make_embed(title="🔒 Lock aktiviert", description=msg, kind="warning")
-                await target_ch.send(embed=emb)
+                try:
+                    await target_ch.send(embed=emb)
+                except Exception:
+                    pass
 
-                # Warten und wieder entsperren
+                # Unlock nach Dauer (nur falls Scheduler nicht übernimmt)
                 await asyncio.sleep(dur_min * 60)
-                if isinstance(target_ch, discord.TextChannel):
-                    if is_priv:
-                        for r in private_roles:
-                            await target_ch.set_permissions(r, send_messages=None, view_channel=True)
-                    else:
-                        await target_ch.set_permissions(everyone, send_messages=None)
-                else:
-                    if is_priv:
-                        for r in private_roles:
-                            await target_ch.set_permissions(r, connect=None, speak=None, view_channel=True)
-                    else:
-                        await target_ch.set_permissions(everyone, connect=None, speak=None)
-
+                await self._apply_unlock(target_ch)
                 text_unlocked = await translate_text_for_guild(
                     interaction.guild.id,
                     "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉"
                 )
                 emb_un = make_embed(title="🔓 Unlock", description=text_unlocked, kind="success")
-                await target_ch.send(embed=emb_un)
+                try:
+                    await target_ch.send(embed=emb_un)
+                except Exception:
+                    pass
                 lock_tasks.pop(target_ch.id, None)
 
+            # Optionaler In-Memory-Fallback (Scheduler macht es „richtig“ & persistent)
             task = self.bot.loop.create_task(_do_lock(ch, delay, duration))
             lock_tasks[ch.id] = task
             scheduled_mentions.append(ch.mention)
 
-        # Bestätigung in lokaler Zeit (Embed via reply_text)
+        # Bestätigung
         return await reply_text(
             interaction,
             f"⏰ Geplante Sperre um **{display_time}** für **{duration}** Minuten.\n"
@@ -283,29 +364,16 @@ class ModerationCog(commands.Cog):
                     pass
                 lock_tasks.pop(ch.id, None)
 
-            everyone = ch.guild.default_role
-            is_priv = ch.overwrites_for(everyone).view_channel is False
-            private_roles: list[discord.Role] = []
-            if is_priv:
-                for role_obj, over in ch.overwrites.items():
-                    if isinstance(role_obj, discord.Role) and over.view_channel:
-                        private_roles.append(role_obj)
+            # Sofort entsperren (Rechte)
+            await self._apply_unlock(ch)
 
-            # Rechte zurücksetzen (unlock)
-            if isinstance(ch, discord.TextChannel):
-                if is_priv:
-                    for r in private_roles:
-                        await ch.set_permissions(r, send_messages=None, view_channel=True)
-                else:
-                    await ch.set_permissions(everyone, send_messages=None)
-            else:
-                if is_priv:
-                    for r in private_roles:
-                        await ch.set_permissions(r, connect=None, speak=None, view_channel=True)
-                else:
-                    await ch.set_permissions(everyone, connect=None, speak=None)
+            # Persistenten Job auf done stellen
+            await execute(
+                "UPDATE public.lock_jobs SET status='done' WHERE guild_id=$1 AND channel_id=$2",
+                ch.guild.id, ch.id
+            )
 
-            # Meldung im Kanal als Embed
+            # Meldung im Kanal
             cfg = await get_guild_cfg(interaction.guild.id)
             tmpl = (cfg.get("templates") or {}).get("unlock", "🔓 Kanal {channel} entsperrt.")
             txt_de = tmpl.format(channel=ch.mention)
@@ -322,6 +390,87 @@ class ModerationCog(commands.Cog):
             ephemeral=True,
         )
 
+    # ---------------------------- Scheduler-Loop ----------------------------
+
+    @tasks.loop(seconds=CHECK_INTERVAL)
+    async def scan_lock_jobs(self):
+        """
+        • pending & fällig -> running setzen, Lock anwenden, ends_at setzen
+        • running & abgelaufen -> Unlock + done
+        """
+        now = datetime.now(timezone.utc)
+
+        # 1) fällige pending-Jobs starten
+        rows = await fetch(
+            """
+            SELECT guild_id, channel_id, run_at, duration_minutes
+            FROM public.lock_jobs
+            WHERE status='pending' AND run_at <= now()
+            """
+        )
+        for r in rows:
+            gid = int(r["guild_id"]); cid = int(r["channel_id"])
+            guild = self.bot.get_guild(gid)
+            if not guild:
+                await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
+                continue
+            ch = guild.get_channel(cid)
+            if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+                await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
+                continue
+
+            duration = int(r["duration_minutes"])
+            started_at = now
+            ends_at = started_at + timedelta(minutes=duration)
+
+            # running & Zeiten setzen
+            await execute(
+                """
+                UPDATE public.lock_jobs
+                SET status='running', started_at=$3, ends_at=$4
+                WHERE guild_id=$1 AND channel_id=$2
+                """,
+                gid, cid, started_at, ends_at
+            )
+
+            await self._apply_lock(ch)
+            await self._notify_locked(ch, gid, display_time="jetzt", duration=duration)
+
+        # 2) laufende Jobs mit abgelaufener Endzeit entsperren
+        running = await fetch(
+            """
+            SELECT guild_id, channel_id, ends_at
+            FROM public.lock_jobs
+            WHERE status='running'
+            """
+        )
+        for r in running:
+            gid = int(r["guild_id"]); cid = int(r["channel_id"])
+            ends_at = r["ends_at"]
+            if not ends_at:
+                continue
+            if now < ends_at:
+                continue
+
+            guild = self.bot.get_guild(gid)
+            if not guild:
+                await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
+                continue
+            ch = guild.get_channel(cid)
+            if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+                await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
+                continue
+
+            await self._apply_unlock(ch)
+            await self._notify_unlocked(ch, gid)
+            await execute(
+                "UPDATE public.lock_jobs SET status='done' WHERE guild_id=$1 AND channel_id=$2",
+                gid, cid
+            )
+
+    @scan_lock_jobs.before_loop
+    async def _before_scan(self):
+        await self.bot.wait_until_ready()
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ModerationCog(bot))
