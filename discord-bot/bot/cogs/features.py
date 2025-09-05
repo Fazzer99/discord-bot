@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 from pathlib import Path
 from ..utils.replies import reply_text
+from ..utils.replies import send_embed
 
 FEATURES_PATH = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
@@ -51,9 +52,9 @@ class FeaturesCog(commands.Cog):
             embeds.append(current)
 
         # Erste Antwort via interaction.response, Rest via followup
-        await interaction.response.send_message(embed=embeds[0])
+        await send_embed(interaction, embeds[0])
         for e in embeds[1:]:
-            await interaction.followup.send(embed=e)
-
+            await send_embed(interaction, e)
+            
 async def setup(bot: commands.Bot):
     await bot.add_cog(FeaturesCog(bot))

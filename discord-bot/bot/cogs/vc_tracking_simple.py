@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..services.translation import translate_text_for_guild
-from ..utils.replies import make_embed, reply_text, reply_success, reply_error
+from ..utils.replies import make_embed, reply_text, reply_success, reply_error, send_embed
 from ..utils.checks import require_manage_guild
 from ..db import fetchrow, fetch, execute
 
@@ -269,11 +269,11 @@ class VcTrackingSimpleCog(commands.Cog):
             emb = await self._render_embed_payload_simple(sess)
             msg: Optional[discord.Message] = None
             if target_channel is not None:
-                msg = await target_channel.send(embed=emb)
+                msg = await send_embed(target_channel, emb)
             else:
                 try:
                     dm = await member.create_dm()
-                    msg = await dm.send(embed=emb)
+                    msg = await send_embed(dm, emb)
                 except Exception:
                     msg = None
 

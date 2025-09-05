@@ -8,7 +8,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..config import settings
-from ..utils.replies import reply_text
+from ..utils.replies import reply_text, send_embed
+from ..utils.timeutil import translate_embed
 from ..services.git_features import commit_features_json  # optionaler Git-Commit
 from ..db import fetch, fetchrow, execute  # DB-Helfer für Bans
 
@@ -121,7 +122,7 @@ class OwnerToolsCog(commands.Cog):
 
         title = f"🤖 Bot-Server ({len(guilds)})"
         emb = discord.Embed(title=title, description="\n".join(pages[0]), color=discord.Color.blurple())
-        await interaction.followup.send(embed=emb, ephemeral=True)
+        await send_embed(interaction, emb, ephemeral=True)
 
         for i in range(1, len(pages)):
             emb = discord.Embed(
@@ -129,7 +130,7 @@ class OwnerToolsCog(commands.Cog):
                 description="\n".join(pages[i]),
                 color=discord.Color.blurple(),
             )
-            await interaction.followup.send(embed=emb, ephemeral=True)
+            await send_embed(interaction, emb, ephemeral=True)
 
     # ───────────────────────── /add_feature ────────────────────────
     @app_commands.command(name="add_feature", description="(Owner) Feature zur Liste hinzufügen")
@@ -313,14 +314,14 @@ class OwnerToolsCog(commands.Cog):
 
         title = f"🚫 Gebannte Guilds ({len(rows)})"
         emb = discord.Embed(title=title, description="\n".join(pages[0]), color=discord.Color.red())
-        await interaction.followup.send(embed=emb, ephemeral=True)
+        await send_embed(interaction, emb, ephemeral=True)
         for i in range(1, len(pages)):
             emb = discord.Embed(
                 title=title + f" – Seite {i+1}",
                 description="\n".join(pages[i]),
                 color=discord.Color.red(),
             )
-            await interaction.followup.send(embed=emb, ephemeral=True)
+            await send_embed(interaction, emb, ephemeral=True)
 
     # ───────────────────── Vote-Reminder (OHNE DB, wiederkehrend) ─────────────────────
 
@@ -360,6 +361,7 @@ class OwnerToolsCog(commands.Cog):
             while True:
                 try:
                     emb = make_vote_embed(channel.guild.name)
+                    emb = await translate_embed(channel.guild.id, emb)
                     # WICHTIG: @everyone muss in content stehen + AllowedMentions setzen
                     await channel.send(
                         content="@everyone",

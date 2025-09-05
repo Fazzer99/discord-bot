@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from ..utils.checks import require_manage_channels
-from ..utils.replies import reply_text, make_embed
+from ..utils.replies import reply_text, make_embed, send_embed
 from ..services.guild_config import get_guild_cfg
 from ..services.translation import translate_text_for_guild
 from ..db import fetch, execute  # <-- DB für persistente Jobs
@@ -126,7 +126,7 @@ class ModerationCog(commands.Cog):
         msg = await translate_text_for_guild(guild_id, msg_de)
         emb = make_embed(title="🔒 Lock aktiviert", description=msg, kind="warning")
         try:
-            await ch.send(embed=emb)
+            await send_embed(ch, emb)
         except Exception:
             pass
 
@@ -134,7 +134,7 @@ class ModerationCog(commands.Cog):
         txt = await translate_text_for_guild(guild_id, "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
         emb_un = make_embed(title="🔓 Unlock", description=txt, kind="success")
         try:
-            await ch.send(embed=emb_un)
+            await send_embed(ch, emb_un)
         except Exception:
             pass
 
@@ -346,7 +346,7 @@ class ModerationCog(commands.Cog):
             tmpl = (cfg.get("templates") or {}).get("unlock", "🔓 Kanal {channel} entsperrt.")
             txt_de = tmpl.format(channel=ch.mention)
             txt = await translate_text_for_guild(interaction.guild.id, txt_de)
-            await ch.send(embed=make_embed(title="🔓 Unlock", description=txt, kind="success"))
+            await send_embed(ch, make_embed(title="🔓 Unlock", description=txt, kind="success"))
 
             unlocked_mentions.append(ch.mention)
 
