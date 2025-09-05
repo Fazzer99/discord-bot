@@ -1,7 +1,7 @@
 # bot/cogs/owner_tools.py
 from __future__ import annotations
+import asyncio
 import json
-import asyncio  # ← NEU
 from pathlib import Path
 import discord
 from discord import app_commands
@@ -14,10 +14,9 @@ from ..db import fetch, fetchrow, execute  # DB-Helfer für Bans
 
 FEATURES_PATH = Path(__file__).resolve().parents[2] / "data" / "features.json"
 
-# ---- NEU: Top.gg Vote-Link + In-Memory Task-Registry ----
+# --- Top.gg Links (für Vote-Reminder) ---
+TOPGG_BOT_URL = "https://top.gg/bot/1387561449592848454"
 TOPGG_VOTE_URL = "https://top.gg/bot/1387561449592848454/vote"
-VOTE_BROADCAST_TASKS: dict[int, asyncio.Task] = {}  # channel_id -> task
-
 
 def _load_features() -> list[tuple[str, str]]:
     if FEATURES_PATH.exists():
@@ -27,29 +26,53 @@ def _load_features() -> list[tuple[str, str]]:
             return []
     return []
 
-
 def _save_features(features: list[tuple[str, str]]) -> None:
     FEATURES_PATH.write_text(json.dumps(features, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ---- NEU: Einfache View mit Vote-Link-Button (ohne Timeout) ----
+# ---------- Einfacher Link-Button für Top.gg ----------
 class VoteSimpleView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(
-            discord.ui.Button(
-                label="Jetzt für Ignix voten ❤️",
-                style=discord.ButtonStyle.link,
-                url=TOPGG_VOTE_URL,
-            )
-        )
+        self.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            label="Jetzt für Ignix voten ❤️",
+            url=TOPGG_VOTE_URL
+        ))
+
+def make_vote_embed(guild_name: str | None = None) -> discord.Embed:
+    """Auffälliges rotes Embed für mehr Sichtbarkeit."""
+    title = "🚨 Bitte unterstützt Ignix auf Top.gg!"
+    desc = (
+        "**Euer Vote hilft enorm**, damit der Bot sichtbarer wird und wir weiter ausbauen können.\n\n"
+        "➡️ **Klickt auf den Button unten** und stimmt für uns ab.\n"
+        f"ℹ️ Alternativ: {TOPGG_BOT_URL}\n\n"
+        "🙏 Vielen Dank für eure Unterstützung!"
+    )
+    emb = discord.Embed(title=title, description=desc, color=discord.Color.red())
+    if guild_name:
+        emb.set_footer(text=f"Ignix • {guild_name}")
+    else:
+        emb.set_footer(text="Ignix • Vote-Reminder")
+    return emb
 
 
 class OwnerToolsCog(commands.Cog):
-    """Owner-only Werkzeuge (Serverliste, Feature-Pflege, Bot verlassen lassen, permanente Bot-Bans)."""
+    """Owner-only Werkzeuge (Serverliste, Feature-Pflege, Bot verlassen lassen, permanente Bot-Bans, Vote-Reminder)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Laufende, einfache (nicht persistente) Reminder-Tasks: channel_id -> Task
+        self._vote_tasks: dict[int, asyncio.Task] = {}
+
+    # Beim Unload alle Reminder stoppen
+    def cog_unload(self):
+        for t in list(self._vote_tasks.values()):
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._vote_tasks.clear()
 
     async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != settings.owner_id:
@@ -207,22 +230,18 @@ class OwnerToolsCog(commands.Cog):
         except ValueError:
             return await reply_text(interaction, "❌ Ungültige Guild-ID (keine Zahl).", kind="error", ephemeral=True)
 
-        # Bereits gebannt?
         existing = await fetchrow("SELECT guild_id FROM public.bot_bans WHERE guild_id=$1", gid)
         if existing:
-            # Nur Grund (reason) aktualisieren, falls angegeben
             if reason:
                 await execute("UPDATE public.bot_bans SET reason=$2 WHERE guild_id=$1", gid, reason)
                 return await reply_text(interaction, f"✅ Guild `{gid}` war bereits gebannt – Grund aktualisiert.", kind="success", ephemeral=True)
             return await reply_text(interaction, f"ℹ️ Guild `{gid}` ist bereits gebannt.", ephemeral=True)
 
-        # Neu eintragen
         await execute(
             "INSERT INTO public.bot_bans (guild_id, reason) VALUES ($1, $2)",
             gid, (reason or None)
         )
 
-        # Falls der Bot aktuell drin ist: sofort verlassen
         g = self.bot.get_guild(gid)
         if g:
             try:
@@ -280,7 +299,6 @@ class OwnerToolsCog(commands.Cog):
             else:
                 lines.append(f"• **{name}** — `{gid}` • Grund: {reason}")
 
-        # Chunken, um Embed-Limits einzuhalten
         pages: list[list[str]] = []
         cur: list[str] = []
         cur_len = 0
@@ -304,117 +322,95 @@ class OwnerToolsCog(commands.Cog):
             )
             await interaction.followup.send(embed=emb, ephemeral=True)
 
-    # ──────────────────────── NEU: einfacher Vote-Broadcast ────────────────────────
+    # ───────────────────── Vote-Reminder (OHNE DB, wiederkehrend) ─────────────────────
+
     @app_commands.command(
         name="vote_broadcast_start",
-        description="(Owner) Startet eine wiederkehrende Vote-Erinnerung in einem Kanal (ohne DB)."
+        description="(Owner) Startet einen wiederkehrenden Vote-Reminder in einem Kanal (mit @everyone)."
     )
     @app_commands.describe(
-        guild_id="Guild-ID",
-        channel="Kanal, in dem gepostet werden soll",
-        every_hours="Intervall in Stunden (min. 1h; Standard 24h)",
-        ping_everyone="Ob @everyone enthalten sein soll (Standard: True)"
+        channel="Kanal, in dem erinnert werden soll",
+        interval_hours="Intervall in Stunden (Standard: 24)"
     )
     async def vote_broadcast_start(
         self,
         interaction: discord.Interaction,
-        guild_id: str,
         channel: discord.TextChannel,
-        every_hours: int = 24,
-        ping_everyone: bool = True,
+        interval_hours: int = 24
     ):
         if not await self._ensure_owner(interaction):
             return
 
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+        if interval_hours <= 0:
+            return await reply_text(interaction, "❌ Ungültiges Intervall.", kind="error", ephemeral=True)
 
-        # Guild-ID prüfen
-        try:
-            gid = int(guild_id)
-        except ValueError:
-            return await reply_text(interaction, "❌ Ungültige Guild-ID.", kind="error", ephemeral=True)
-
-        if channel.guild.id != gid:
-            return await reply_text(interaction, "❌ Der Kanal gehört nicht zu dieser Guild.", kind="error", ephemeral=True)
-
-        # Intervall prüfen
-        every_hours = max(1, int(every_hours))
-        interval_seconds = every_hours * 3600
-
-        # Falls für diesen Kanal schon läuft → zuerst stoppen
-        old = VOTE_BROADCAST_TASKS.pop(channel.id, None)
+        # Falls schon ein Task für diesen Kanal läuft: erst stoppen
+        old = self._vote_tasks.pop(channel.id, None)
         if old:
             try:
                 old.cancel()
             except Exception:
                 pass
 
-        base_msg = (
-            "🚀 **Bitte unterstützt Ignix!**\n\n"
-            "Wenn euch der Bot gefällt, stimmt bitte für uns auf Top.gg ab. "
-            "Das hilft enorm, bekannter zu werden. Vielen Dank! 🙏"
-        )
-        if ping_everyone:
-            base_msg = "@everyone " + base_msg
-
         view = VoteSimpleView()
+        allowed = discord.AllowedMentions(everyone=True, roles=False, users=False)
+        interval_seconds = int(interval_hours * 3600)
 
         async def _loop():
             while True:
                 try:
-                    await channel.send(content=base_msg, view=view)
+                    emb = make_vote_embed(channel.guild.name)
+                    # WICHTIG: @everyone muss in content stehen + AllowedMentions setzen
+                    await channel.send(
+                        content="@everyone",
+                        embed=emb,
+                        view=view,
+                        allowed_mentions=allowed
+                    )
                 except discord.Forbidden:
-                    break  # keine Rechte -> Task beenden
+                    break  # Keine Rechte mehr → Task beenden
                 except Exception:
-                    pass  # unerwartet -> trotzdem weiter im Intervall
+                    # Unerwarteter Fehler: trotzdem weitermachen
+                    pass
                 await asyncio.sleep(interval_seconds)
 
-        task = asyncio.create_task(_loop(), name=f"vote_broadcast_{channel.id}")
-        VOTE_BROADCAST_TASKS[channel.id] = task
+        task = asyncio.create_task(_loop())
+        self._vote_tasks[channel.id] = task
 
         return await reply_text(
             interaction,
-            f"✅ Vote-Broadcast gestartet in {channel.mention} – alle **{every_hours}h** "
-            f"{'(mit @everyone)' if ping_everyone else '(ohne @everyone)'}.\n"
-            "Hinweis: Läuft **ohne DB** und **endet bei Bot-Restart** automatisch.",
+            f"✅ Vote-Reminder gestartet in {channel.mention} (alle **{interval_hours}h**, mit **@everyone**).",
             kind="success",
             ephemeral=True,
         )
 
     @app_commands.command(
         name="vote_broadcast_stop",
-        description="(Owner) Stoppt die wiederkehrende Vote-Erinnerung in einem Kanal."
+        description="(Owner) Stoppt den Vote-Reminder in einem Kanal."
     )
-    @app_commands.describe(channel="Kanal, in dem aktuell gesendet wird")
-    async def vote_broadcast_stop(
-        self,
-        interaction: discord.Interaction,
-        channel: discord.TextChannel,
-    ):
+    @app_commands.describe(channel="Kanal, in dem aktuell erinnert wird")
+    async def vote_broadcast_stop(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not await self._ensure_owner(interaction):
             return
 
-        task = VOTE_BROADCAST_TASKS.pop(channel.id, None)
-        if not task:
+        task = self._vote_tasks.pop(channel.id, None)
+        if task:
+            try:
+                task.cancel()
+            except Exception:
+                pass
             return await reply_text(
                 interaction,
-                f"ℹ️ Für {channel.mention} läuft aktuell **kein** Vote-Broadcast.",
-                kind="info",
+                f"🛑 Vote-Reminder in {channel.mention} gestoppt.",
+                kind="success",
                 ephemeral=True,
             )
-
-        try:
-            task.cancel()
-        except Exception:
-            pass
-
-        return await reply_text(
-            interaction,
-            f"🛑 Vote-Broadcast in {channel.mention} gestoppt.",
-            kind="success",
-            ephemeral=True,
-        )
+        else:
+            return await reply_text(
+                interaction,
+                f"ℹ️ In {channel.mention} läuft derzeit kein Vote-Reminder.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
