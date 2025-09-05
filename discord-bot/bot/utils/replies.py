@@ -65,7 +65,9 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
     Schickt eine Nachricht zu einer Interaction.
     - Wenn noch NICHT geantwortet/deferred wurde -> response.send_message()
     - Wenn bereits geantwortet/deferred -> followup.send()
-    - Fallback: wenn das Interaction-Token ungültig ist (NotFound), sende in den Kanal.
+    Fallbacks bei Fehlern/abgelaufenem Token:
+      1) DM an den Nutzer
+      2) Nachricht im aktuellen Kanal (nicht-ephemeral), mit Hinweis
     """
     try:
         if not inter.response.is_done():
@@ -73,13 +75,32 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
         else:
             return await inter.followup.send(embed=embed, ephemeral=ephemeral)
     except discord.NotFound:
-        # Interaction-Token bereits invalid -> versuche Kanal-Fallback
-        try:
-            if inter.channel:
-                return await inter.channel.send(embed=embed)
-        except Exception:
-            pass
-        return None
+        # Interaction-Token bereits ungültig -> Fallbacks nutzen
+        pass
+    except discord.HTTPException as e:
+        # 401/50027 = Invalid Webhook Token -> Fallbacks nutzen
+        if not (e.status == 401 or getattr(e, "code", None) == 50027):
+            raise
+
+    # ── Fallback 1: DM ─────────────────────────────────────────────
+    try:
+        user = getattr(inter, "user", None)
+        if user is not None:
+            return await user.send(embed=embed)
+    except Exception:
+        pass
+
+    # ── Fallback 2: Kanal-Message ─────────────────────────────────
+    try:
+        ch = getattr(inter, "channel", None)
+        if ch is not None:
+            prefix = f"{inter.user.mention} " if getattr(inter, "user", None) else ""
+            note = "(Hinweis: Ephemeral-Fallback nicht möglich – Interaction-Token abgelaufen.) "
+            return await ch.send(content=prefix + note, embed=embed)
+    except Exception:
+        pass
+
+    return None
 
 # --------------------------------- API: Replies --------------------------------
 
