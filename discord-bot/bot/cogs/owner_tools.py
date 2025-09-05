@@ -248,7 +248,7 @@ class OwnerToolsCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
 
         rows = await fetch(
-            "SELECT guild_id, reason, created_at FROM public.bot_bans ORDER BY created_at DESC LIMIT 200"
+            "SELECT guild_id, reason, added_at FROM public.bot_bans ORDER BY added_at DESC LIMIT 200"
         )
         if not rows:
             return await reply_text(interaction, "ℹ️ Es sind aktuell **keine** Guilds gebannt.", ephemeral=True)
@@ -257,12 +257,12 @@ class OwnerToolsCog(commands.Cog):
         for r in rows:
             gid = r.get("guild_id")
             reason = r.get("reason") or "—"
-            created = r.get("created_at")
+            added = r.get("added_at")
             # Wenn der Bot die Guild aktuell kennt, Name anzeigen
             g = self.bot.get_guild(int(gid)) if gid is not None else None
             name = g.name if g else "?"
-            if created:
-                lines.append(f"• **{name}** — `{gid}` • Grund: {reason} • seit: {created}")
+            if added:
+                lines.append(f"• **{name}** — `{gid}` • Grund: {reason} • seit: {added}")
             else:
                 lines.append(f"• **{name}** — `{gid}` • Grund: {reason}")
 
