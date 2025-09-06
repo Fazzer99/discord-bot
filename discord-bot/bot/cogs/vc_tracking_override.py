@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..services.translation import translate_text_for_guild
-from ..utils.replies import make_embed, reply_text, send_embed
+from ..utils.replies import make_embed, reply_text, send_embed, tracked_send  # ← tracked_send hinzu
 from ..utils.checks import require_manage_guild
 from ..db import fetchrow, execute, fetch
 
@@ -153,16 +153,16 @@ async def _start_or_attach_session(member: discord.Member, vc: discord.VoiceChan
         elif member.guild.system_channel:
             target_channel = member.guild.system_channel
 
-        # Erstes Embed senden
+        # Erstes Embed senden → via tracked_send (Usage-Logging)
         emb = await _render_embed_payload(sess)
         msg: Optional[discord.Message] = None
         if target_channel is not None:
-            msg = await send_embed(target_channel, emb)
+            msg = await tracked_send(target_channel, embed=emb, guild_id=member.guild.id)
         else:
             # Fallback: DM an Trigger
             try:
                 dm = await member.create_dm()
-                msg = await send_embed(dm, emb)
+                msg = await tracked_send(dm, embed=emb, user_id=member.id)
             except Exception:
                 msg = None
 
@@ -398,7 +398,8 @@ class VcTrackingOverrideCog(commands.Cog):
         if added < len(rows):
             emb.set_footer(text=f"… und {len(rows)-added} weitere Einträge.")
 
-        return await interaction.response.send_message(embed=emb, ephemeral=True)    
+        # über send_embed → Ephemeral-Logging greift
+        return await send_embed(interaction, emb, ephemeral=True)
 
     # ---------- Listener: Override + Live-Tracking ------------------------
     @commands.Cog.listener()

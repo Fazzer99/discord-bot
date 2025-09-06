@@ -2,7 +2,7 @@
 from __future__ import annotations
 import logging
 import discord
-from discord import app_commands   # <— wichtig: auf Modulebene
+from discord import app_commands
 from discord.ext import commands
 
 from .config import settings
@@ -22,6 +22,7 @@ EXTENSIONS = [
     "bot.cogs.verify",
     "bot.cogs.welcome_leave",
     "bot.cogs.owner_tools",
+    "bot.usage",
 ]
 
 # Basic logging (Railway-Logs)
@@ -46,10 +47,10 @@ class FazzerBot(commands.Bot):
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
 
-        # 2a) Statische DE->EN Localizations für Slash-Commands anlegen
+        # 2a) Statische DE->EN Localizations
         await self._apply_de_en_localizations()
 
-        # 2b) Globale Checks an alle Slash-Commands hängen
+        # 2b) Globale Checks
         from .utils.checks import ensure_onboarded
 
         async def _onboard_check(interaction: discord.Interaction) -> bool:
@@ -64,11 +65,10 @@ class FazzerBot(commands.Bot):
                     if sub.name not in {"setlang", "onboard", "set_timezone"}:
                         sub.checks.append(_onboard_check)  # type: ignore[attr-defined]
 
-        # 2c) Tree-Error-Handler: schickt IMMER eine freundliche Antwort
+        # 2c) Tree-Error-Handler
         from .utils.replies import reply_text, reply_error
 
         async def _tree_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
-            # Fehlende Voraussetzungen/Checks
             if isinstance(error, app_commands.CheckFailure):
                 try:
                     msg = "❌ Dir fehlen die nötigen Berechtigungen oder Voraussetzungen für diesen Befehl."
@@ -83,7 +83,6 @@ class FazzerBot(commands.Bot):
                     pass
                 return
 
-            # Spezifisch: fehlende Rechte
             if isinstance(error, app_commands.MissingPermissions):
                 try:
                     await reply_error(interaction, "❌ Dir fehlen die nötigen Berechtigungen.", ephemeral=True)
@@ -91,7 +90,6 @@ class FazzerBot(commands.Bot):
                     pass
                 return
 
-            # Cooldowns nett erklären
             if isinstance(error, app_commands.CommandOnCooldown):
                 try:
                     await reply_text(
@@ -104,7 +102,6 @@ class FazzerBot(commands.Bot):
                     pass
                 return
 
-            # Fallback: ordentlich loggen + kurze Meldung
             cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
             log.exception(f"Slash-Command-Error in /{cmd_name}: {error}")
             try:
@@ -116,7 +113,7 @@ class FazzerBot(commands.Bot):
 
         # 3) Slash-Commands synchronisieren
         try:
-            TEST_GUILD_ID = None  # z.B. 123456789012345678 für schnelleren Guild-Sync
+            TEST_GUILD_ID = None
             if TEST_GUILD_ID:
                 synced = await self.tree.sync(guild=discord.Object(id=TEST_GUILD_ID))
             else:
@@ -125,32 +122,23 @@ class FazzerBot(commands.Bot):
         except Exception as e:
             log.exception(f"Slash-Command-Sync fehlgeschlagen: {e}")
 
-        # 4) Presence setzen
+        # 4) Presence
         try:
             await self.change_presence(
-                activity=discord.Activity(
-                    type=discord.ActivityType.listening,
-                    name="/help • /features"
-                ),
+                activity=discord.Activity(type=discord.ActivityType.listening, name="/help • /features"),
                 status=discord.Status.online,
             )
         except Exception:
             pass
 
     async def _apply_de_en_localizations(self):
-        """
-        Setzt für alle Slash-Commands & deren Optionen EN-Localizations
-        basierend auf deutschen Beschreibungen (DE=Default, EN=Fallback).
-        """
         from .services.translation import de_to_en_static
 
         async def localize_command(cmd: app_commands.Command):
-            # Command-Beschreibung
             if getattr(cmd, "description", None):
                 en = await de_to_en_static(cmd.description)
                 cmd.description_localizations = {"en-US": en, "en-GB": en}
 
-            # Parameter-Beschreibungen
             for param in getattr(cmd, "parameters", []):
                 desc = getattr(param, "description", None)
                 if desc:
@@ -172,7 +160,8 @@ def run_bot():
     # Intents
     intents = discord.Intents.default()
     intents.message_content = True
-    intents.members = True  # benötigt für Autorole/Welcome/Leave
+    intents.members = True
+    intents.voice_states = True  # ← empfohlen für VC-Tracking
 
     # Bot erstellen
     bot = FazzerBot(command_prefix="!", intents=intents)

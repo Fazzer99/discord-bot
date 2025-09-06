@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from ..services.guild_config import get_guild_cfg, update_guild_cfg
 from ..services.translation import translate_text_for_guild
-from ..utils.replies import make_embed, reply_text, reply_success, reply_error, send_embed
+from ..utils.replies import make_embed, reply_text, reply_success, reply_error, send_embed, tracked_send  # ← tracked_send hinzu
 from ..utils.checks import require_manage_guild
 from ..db import fetchrow, fetch, execute
 
@@ -145,7 +145,8 @@ class VcTrackingSimpleCog(commands.Cog):
                 f"**Getrackte Sprachkanäle:** —"
             )
             emb = make_embed(title="🔧 VC-Tracking – Konfiguration", description=desc, kind="info", fields=[])
-            return await interaction.response.send_message(embed=emb, ephemeral=True)
+            # über send_embed → Ephemeral-Logging greift
+            return await send_embed(interaction, emb, ephemeral=True)
 
         # Embed mit Liste der Channels
         emb = make_embed(
@@ -168,7 +169,7 @@ class VcTrackingSimpleCog(commands.Cog):
         if added < len(rows):
             emb.set_footer(text=f"… und {len(rows) - added} weitere Einträge.")
 
-        return await interaction.response.send_message(embed=emb, ephemeral=True)
+        return await send_embed(interaction, emb, ephemeral=True)  # ← statt interaction.response.send_message
 
     # ---------- RENDER / UPDATE ----------
 
@@ -265,15 +266,15 @@ class VcTrackingSimpleCog(commands.Cog):
             elif member.guild.system_channel:
                 target_channel = member.guild.system_channel
 
-            # Erstes Embed senden (mit Fallback DM)
+            # Erstes Embed senden (mit Fallback DM) – jetzt via tracked_send → Usage-Log
             emb = await self._render_embed_payload_simple(sess)
             msg: Optional[discord.Message] = None
             if target_channel is not None:
-                msg = await send_embed(target_channel, emb)
+                msg = await tracked_send(target_channel, embed=emb, guild_id=member.guild.id)
             else:
                 try:
                     dm = await member.create_dm()
-                    msg = await send_embed(dm, emb)
+                    msg = await tracked_send(dm, embed=emb, user_id=member.id)  # DM → user_id mitgeben
                 except Exception:
                     msg = None
 

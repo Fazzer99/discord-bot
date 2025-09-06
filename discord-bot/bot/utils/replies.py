@@ -4,6 +4,7 @@ from typing import Optional, Iterable, Tuple
 import discord
 from .timeutil import translate_embed
 from ..services.translation import translate_text_for_guild
+from ..usage import log_interaction_output
 
 # ----------------------------- Farb-/Style-Helfer -----------------------------
 
@@ -71,9 +72,20 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
     """
     try:
         if not inter.response.is_done():
-            return await inter.response.send_message(embed=embed, ephemeral=ephemeral)
+            res = await inter.response.send_message(embed=embed, ephemeral=ephemeral)
         else:
-            return await inter.followup.send(embed=embed, ephemeral=ephemeral)
+            res = await inter.followup.send(embed=embed, ephemeral=ephemeral)
+
+        # ✨ NEU: Ephemeral-Antwort protokollieren (sichtbare Channel-Replies
+        # werden vom Usage-Logger via on_message erfasst)
+        if ephemeral:
+            try:
+                await log_interaction_output(inter, embed=embed, message_type="ephemeral")
+            except Exception:
+                pass
+
+        return res
+
     except discord.NotFound:
         # Interaction-Token bereits ungültig -> Fallbacks nutzen
         pass
@@ -86,6 +98,7 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
     try:
         user = getattr(inter, "user", None)
         if user is not None:
+            # Sichtbare DM → wird vom Usage-Logger erfasst
             return await user.send(embed=embed)
     except Exception:
         pass
@@ -96,11 +109,64 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
         if ch is not None:
             prefix = f"{inter.user.mention} " if getattr(inter, "user", None) else ""
             note = "(Hinweis: Ephemeral-Fallback nicht möglich – Interaction-Token abgelaufen.) "
+            # Sichtbare Channel-Message → wird vom Usage-Logger erfasst
             return await ch.send(content=prefix + note, embed=embed)
     except Exception:
         pass
 
     return None
+
+# --------------------------- Tracked Send (sichtbar) ---------------------------
+# Nutze diese Funktion statt channel.send()/user.send() in deinem Code,
+# damit alle sichtbaren Ausgaben konsistent über den Usage-Logger gezählt werden.
+# WICHTIG: tracked_send selbst schreibt NICHT in die DB (kein Doppelzählen),
+# das übernimmt der UsageLogger (on_message).
+
+async def tracked_send(
+    target: discord.abc.Messageable | discord.User | discord.Member | discord.Message,
+    *,
+    content: Optional[str] = None,
+    embed: Optional[discord.Embed] = None,
+    embeds: Optional[Iterable[discord.Embed]] = None,
+    view: Optional[discord.ui.View] = None,
+    **kwargs
+):
+    """
+    Dünner Wrapper um .send() / .reply(), der NICHT selbst loggt.
+    Sichtbare Nachrichten werden automatisch im UsageLogger.on_message gezählt.
+    """
+    # embeds vereinheitlichen
+    embeds_list = list(embeds) if embeds is not None else None
+    if embed is not None:
+        if embeds_list is None:
+            embeds_list = [embed]
+        else:
+            embeds_list = list(embeds_list) + [embed]
+
+    # Ziel ermitteln und senden
+    try:
+        if isinstance(target, discord.Message):
+            # Reply auf eine vorhandene Nachricht
+            return await target.reply(content=content, embed=None if embeds_list else None,
+                                      embeds=embeds_list, view=view, **kwargs)
+
+        # Alles andere, was sendbar ist
+        send_fn = getattr(target, "send", None)
+        if callable(send_fn):
+            return await send_fn(content=content, embed=None if embeds_list else None,
+                                 embeds=embeds_list, view=view, **kwargs)
+
+        # Fallback: versuche auf channel zu gehen, falls target sowas hat
+        ch = getattr(target, "channel", None)
+        if ch and hasattr(ch, "send"):
+            return await ch.send(content=content, embed=None if embeds_list else None,
+                                 embeds=embeds_list, view=view, **kwargs)
+    except Exception:
+        # Niemals die Bot-Laufzeit killen
+        raise
+
+    # Wenn gar kein send() verfügbar war:
+    raise TypeError("tracked_send: unsupported target type")
 
 # --------------------------------- API: Replies --------------------------------
 

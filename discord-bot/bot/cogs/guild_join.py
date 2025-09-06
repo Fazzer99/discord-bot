@@ -4,7 +4,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from ..utils.replies import reply_text, make_embed, send_embed
+from ..utils.replies import reply_text, make_embed, send_embed, tracked_send  # ← tracked_send hinzugefügt
 from ..services.features import load_features
 from ..db import fetchrow
 
@@ -113,7 +113,8 @@ class GuildJoinCog(commands.Cog):
                 kind="success",
             )
             try:
-                await owner.send(embed=emb, view=WelcomeView())
+                # DM → tracked_send mit user_id & lang="en"
+                await tracked_send(owner, embed=emb, view=WelcomeView(), user_id=owner.id, lang="en")
             except discord.Forbidden:
                 try:
                     await reply_text(
@@ -121,7 +122,8 @@ class GuildJoinCog(commands.Cog):
                         "I couldn't DM the server owner. Here are the Support and Top.gg links:",
                         kind="warning",
                     )
-                    await setup_channel.send(view=WelcomeView())
+                    # Kanal-Message mit View → tracked_send (guild_id)
+                    await tracked_send(setup_channel, view=WelcomeView(), guild_id=guild.id)
                 except Exception:
                     pass
 

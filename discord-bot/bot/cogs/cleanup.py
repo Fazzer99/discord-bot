@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from ..utils.checks import require_manage_messages
-from ..utils.replies import reply_text
+from ..utils.replies import reply_text, tracked_send  # <-- tracked_send hinzugefügt
 from ..services.translation import translate_text_for_guild
 from ..db import fetch, execute  # <-- DB für Regeln
 
@@ -106,7 +106,7 @@ class CleanupCog(commands.Cog):
             await _purge_all(ch)
             try:
                 msg = await translate_text_for_guild(ch.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht.")
-                await ch.send(msg)
+                await tracked_send(ch, content=msg, guild_id=ch.guild.id)
             except discord.Forbidden:
                 pass
 
@@ -117,7 +117,7 @@ class CleanupCog(commands.Cog):
                     wm = (interval_s - pre) / 60
                     text = (f"in {int(wm//60)} Stunde(n)" if wm >= 60 else f"in {int(wm)} Minute(n)")
                     warn = await translate_text_for_guild(ch.guild.id, f"⚠️ Achtung: {text}, dann werden alle Nachrichten gelöscht.")
-                    await ch.send(warn)
+                    await tracked_send(ch, content=warn, guild_id=ch.guild.id)
                     await asyncio.sleep(interval_s - pre)
                 else:
                     await asyncio.sleep(interval_s)
@@ -125,7 +125,7 @@ class CleanupCog(commands.Cog):
                 await _purge_all(ch)
                 try:
                     msg = await translate_text_for_guild(ch.guild.id, "🗑️ Alle Nachrichten wurden automatisch gelöscht.")
-                    await ch.send(msg)
+                    await tracked_send(ch, content=msg, guild_id=ch.guild.id)
                 except discord.Forbidden:
                     pass
 
@@ -195,7 +195,7 @@ class CleanupCog(commands.Cog):
             try:
                 await _purge_all(ch)
                 msg = await translate_text_for_guild(gid, "🗑️ Alle Nachrichten wurden automatisch gelöscht.")
-                await ch.send(msg)
+                await tracked_send(ch, content=msg, guild_id=gid)
             except Exception:
                 pass
 

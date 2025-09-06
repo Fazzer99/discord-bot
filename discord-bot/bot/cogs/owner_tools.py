@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..config import settings
-from ..utils.replies import reply_text, send_embed
+from ..utils.replies import reply_text, send_embed, tracked_send  # ← tracked_send hinzugefügt
 from ..utils.timeutil import translate_embed
 from ..services.git_features import commit_features_json  # optionaler Git-Commit
 from ..db import fetch, fetchrow, execute  # DB-Helfer für Bans
@@ -362,12 +362,14 @@ class OwnerToolsCog(commands.Cog):
                 try:
                     emb = make_vote_embed(channel.guild.name)
                     emb = await translate_embed(channel.guild.id, emb)
-                    # WICHTIG: @everyone muss in content stehen + AllowedMentions setzen
-                    await channel.send(
+                    # NEU: tracked_send für Usage-Logging (mixed: content + embed)
+                    await tracked_send(
+                        channel,
                         content="@everyone",
                         embed=emb,
                         view=view,
-                        allowed_mentions=allowed
+                        guild_id=channel.guild.id,
+                        allowed_mentions=allowed,
                     )
                 except discord.Forbidden:
                     break  # Keine Rechte mehr → Task beenden
