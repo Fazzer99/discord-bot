@@ -201,7 +201,7 @@ class UsageCog(commands.Cog):
             pass
 
     # 2) Dashboard /bot_usage (Owner)
-    @app_commands.command(name="bot_usage", description="(Owner) Zeichen-Usage des Bots anzeigen.")
+    @app_commands.command(name="bot_usage", description="(Owner) Usage-Dashboard des Bots anzeigen.")
     @app_commands.describe(
         range="Zeitraum",
         from_iso="Start (bei custom), ISO 8601, z.B. 2025-08-04T00:00:00",
@@ -235,7 +235,7 @@ class UsageCog(commands.Cog):
             app_commands.Choice(name="DM (ohne Guild)", value="dm"),
         ],
     )
-    async def bot_usage(
+    async def usage_dashboard(
         self,
         interaction: discord.Interaction,
         range: RangeOpt = "7d",
