@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging  # ✨ NEU
 
 import discord
 from discord import app_commands
@@ -17,15 +18,21 @@ from ..db import fetch, execute  # <-- DB für persistente Jobs
 lock_tasks: dict[int, asyncio.Task] = {}
 CHECK_INTERVAL = 20  # Sekunden für den Scheduler-Loop
 
+# ✨ NEU: Logger
+log = logging.getLogger("ignix.mod")
+
+
 class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         # integrierter Scheduler
         self.scan_lock_jobs.start()
+        log.info("[INIT] ModerationCog initialisiert, Scheduler gestartet (interval=%ss)", CHECK_INTERVAL)
 
     def cog_unload(self):
         try:
             self.scan_lock_jobs.cancel()
+            log.info("[UNLOAD] Scheduler gestoppt")
         except Exception:
             pass
 
@@ -126,17 +133,19 @@ class ModerationCog(commands.Cog):
         msg = await translate_text_for_guild(guild_id, msg_de)
         emb = make_embed(title="🔒 Lock aktiviert", description=msg, kind="warning")
         try:
+            log.info("[NOTIFY] sending LOCK notice gid=%s cid=%s", guild_id, ch.id)
             await tracked_send(ch, embed=emb, guild_id=guild_id)  # ← statt send_embed
-        except Exception:
-            pass
+        except Exception as e:
+            log.exception("[NOTIFY] FAILED to send LOCK notice gid=%s cid=%s err=%s", guild_id, ch.id, e)
 
     async def _notify_unlocked(self, ch: discord.TextChannel | discord.VoiceChannel, guild_id: int):
         txt = await translate_text_for_guild(guild_id, "🔓 Kanal automatisch entsperrt – viel Spaß! 🎉")
         emb_un = make_embed(title="🔓 Unlock", description=txt, kind="success")
         try:
+            log.info("[NOTIFY] sending UNLOCK notice gid=%s cid=%s", guild_id, ch.id)
             await tracked_send(ch, embed=emb_un, guild_id=guild_id)  # ← statt send_embed
-        except Exception:
-            pass
+        except Exception as e:
+            log.exception("[NOTIFY] FAILED to send UNLOCK notice gid=%s cid=%s err=%s", guild_id, ch.id, e)
 
     # -------------------------------- lock ---------------------------------
 
@@ -248,9 +257,12 @@ class ModerationCog(commands.Cog):
                 """,
                 interaction.guild.id, ch.id, run_at_utc, int(duration), interaction.user.id
             )
+            log.info("[CMD/LOCK] scheduled gid=%s cid=%s at=%sZ dur=%s",
+                     interaction.guild.id, ch.id, run_at_utc.isoformat(), duration)
 
             # Wenn Start binnen 5s fällig ist -> sofort ausführen (einmalig) und Job auf running setzen
             if (run_at_utc - now_utc).total_seconds() <= 5:
+                log.info("[CMD/LOCK] immediate apply gid=%s cid=%s", interaction.guild.id, ch.id)
                 await self._apply_lock(ch)
                 await self._notify_locked(ch, interaction.guild.id, display_time="jetzt", duration=duration)
                 await execute(
@@ -368,6 +380,7 @@ class ModerationCog(commands.Cog):
         • running & abgelaufen -> Unlock + done
         """
         now = datetime.now(timezone.utc)
+        log.info("[SCAN] tick at %sZ", now.isoformat())
 
         # 1) fällige pending-Jobs starten
         rows = await fetch(
@@ -377,14 +390,18 @@ class ModerationCog(commands.Cog):
             WHERE status='pending' AND run_at <= now()
             """
         )
+        log.info("[SCAN] pending rows: %d", len(rows) if rows else 0)
+
         for r in rows:
             gid = int(r["guild_id"]); cid = int(r["channel_id"])
             guild = self.bot.get_guild(gid)
             if not guild:
+                log.warning("[LOCK] guild not found gid=%s → cancelling job cid=%s", gid, cid)
                 await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
                 continue
             ch = guild.get_channel(cid)
             if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+                log.warning("[LOCK] channel not found/invalid gid=%s cid=%s → cancelling job", gid, cid)
                 await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
                 continue
 
@@ -401,9 +418,15 @@ class ModerationCog(commands.Cog):
                 """,
                 gid, cid, started_at, ends_at
             )
+            log.info("[LOCK] start running gid=%s cid=%s dur=%s ends_at=%sZ", gid, cid, duration, ends_at.isoformat())
 
-            await self._apply_lock(ch)
-            await self._notify_locked(ch, gid, display_time="jetzt", duration=duration)
+            try:
+                log.info("[LOCK] applying lock gid=%s cid=%s", gid, cid)
+                await self._apply_lock(ch)
+                await self._notify_locked(ch, gid, display_time="jetzt", duration=duration)
+                log.info("[LOCK] applied gid=%s cid=%s", gid, cid)
+            except Exception as e:
+                log.exception("[LOCK] ERROR apply gid=%s cid=%s: %s", gid, cid, e)
 
         # 2) laufende Jobs mit abgelaufener Endzeit entsperren
         running = await fetch(
@@ -413,6 +436,8 @@ class ModerationCog(commands.Cog):
             WHERE status='running'
             """
         )
+        log.info("[SCAN] running rows: %d", len(running) if running else 0)
+
         for r in running:
             gid = int(r["guild_id"]); cid = int(r["channel_id"])
             ends_at = r["ends_at"]
@@ -423,23 +448,35 @@ class ModerationCog(commands.Cog):
 
             guild = self.bot.get_guild(gid)
             if not guild:
+                log.warning("[UNLOCK] guild not found gid=%s → cancelling job cid=%s", gid, cid)
                 await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
                 continue
             ch = guild.get_channel(cid)
             if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+                log.warning("[UNLOCK] channel not found/invalid gid=%s cid=%s → cancelling job", gid, cid)
                 await execute("UPDATE public.lock_jobs SET status='cancelled' WHERE guild_id=$1 AND channel_id=$2", gid, cid)
                 continue
 
-            await self._apply_unlock(ch)
-            await self._notify_unlocked(ch, gid)
+            try:
+                log.info("[UNLOCK] applying unlock gid=%s cid=%s", gid, cid)
+                await self._apply_unlock(ch)
+                await self._notify_unlocked(ch, gid)
+                log.info("[UNLOCK] done gid=%s cid=%s", gid, cid)
+            except Exception as e:
+                log.exception("[UNLOCK] ERROR gid=%s cid=%s: %s", gid, cid, e)
+
             await execute(
                 "UPDATE public.lock_jobs SET status='done' WHERE guild_id=$1 AND channel_id=$2",
                 gid, cid
             )
+            log.info("[UNLOCK] job set to done gid=%s cid=%s", gid, cid)
 
     @scan_lock_jobs.before_loop
     async def _before_scan(self):
+        log.info("[SCAN] waiting until bot is ready …")
         await self.bot.wait_until_ready()
+        log.info("[SCAN] bot ready, loop running")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ModerationCog(bot))
+    log.info("[SETUP] ModerationCog geladen")
