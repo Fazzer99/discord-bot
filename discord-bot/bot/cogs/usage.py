@@ -158,17 +158,29 @@ class UsageCog(commands.Cog):
     # 1) Sichtbare Bot-Nachrichten (Channel & DM) loggen
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
-        # Nur Nachrichten des *eigenen* Bots
-        if not msg.author.bot or not self.bot.user or msg.author.id != self.bot.user.id:
-            return
-
-        # Ephemeral gibt es hier nicht – alles hier ist sichtbar
+        # Wir zählen NUR Nachrichten des eigenen Bots ODER Webhook-Messages,
+        # die von *unserer* Anwendung stammen (Interaction-/Followup-Posts).
         try:
+            is_own_bot_msg = (self.bot.user is not None and msg.author.id == self.bot.user.id)
+
+            # Webhook-Fälle: interaction/followup sendet als Webhook.
+            # Wir erkennen sie zuverlässig über msg.webhook_id != None.
+            # Um false positives (fremde Webhooks) zu vermeiden, lassen wir NUR zu,
+            # wenn entweder (a) author.bot True ist ODER (b) msg.interaction existiert.
+            is_our_webhook_msg = (
+                msg.webhook_id is not None and
+                (getattr(msg.author, "bot", False) or getattr(msg, "interaction", None) is not None)
+            )
+
+            if not (is_own_bot_msg or is_our_webhook_msg):
+                return
+
+            # Ephemeral tauchen hier gar nicht auf; alles hier ist sichtbar
             is_dm = isinstance(msg.channel, (discord.DMChannel, discord.GroupChannel))
             guild_id = msg.guild.id if msg.guild else None
             channel_id = msg.channel.id
 
-            # Bei DM: Empfänger (nicht kritisch, Best-Effort)
+            # Bei DM: Empfänger (best effort)
             user_id = None
             if is_dm:
                 try:
@@ -176,10 +188,15 @@ class UsageCog(commands.Cog):
                 except Exception:
                     user_id = None
 
-            chars = total_message_chars(msg.content, msg.embeds)
+            # Zeichen zählen (Content + Embeds). Ohne Message Content Intent ist msg.content leer,
+            # Embeds zählen trotzdem.
+            from ..utils.replies import _total_message_chars  # lokaler Import, um Zirkularität zu vermeiden
+            chars = _total_message_chars(msg.content, msg.embeds)
             if chars <= 0:
                 return
 
+            # Sprache bestimmen
+            from ..utils.replies import _guild_lang  # ebenfalls lokaler Import
             lang = await _guild_lang(guild_id)
 
             await execute(
@@ -197,7 +214,9 @@ class UsageCog(commands.Cog):
                 bool(is_dm),
                 False,
             )
+
         except Exception:
+            # Logging darf nie die Laufzeit stören
             pass
 
     # 2) Dashboard /bot_usage (Owner)
