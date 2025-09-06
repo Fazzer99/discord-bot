@@ -419,7 +419,7 @@ class UsageCog(commands.Cog):
                 """
                 INSERT INTO public.output_usage
                     (ts, guild_id, channel_id, user_id, message_type, chars, lang, is_dm, is_ephemeral)
-                VALUES (now(), $1, $2, $3, 'diag', 7, 'de', false, false)
+                VALUES (now(), $1, $2, $3, 'channel', 7, 'de', false, false)
                 """,
                 interaction.guild_id, interaction.channel_id, interaction.user.id
             )
