@@ -8,7 +8,6 @@ from discord.ext import commands
 from .config import settings
 from .db import init_db
 
-# Alle Cogs, die geladen werden sollen
 EXTENSIONS = [
     "bot.cogs.admin",
     "bot.cogs.autorole",
@@ -25,21 +24,18 @@ EXTENSIONS = [
     "bot.cogs.usage",
 ]
 
-# Basic logging (Railway-Logs)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("discord-bot")
 
 
 class FazzerBot(commands.Bot):
     async def setup_hook(self):
-        # 1) DB initialisieren
         try:
             await init_db()
             log.info("DB initialisiert (oder übersprungen, wenn keine DATABASE_URL).")
         except Exception as e:
             log.exception(f"DB-Initialisierung fehlgeschlagen: {e}")
 
-        # 2) Cogs laden
         for ext in EXTENSIONS:
             try:
                 await self.load_extension(ext)
@@ -47,10 +43,8 @@ class FazzerBot(commands.Bot):
             except Exception as e:
                 log.exception(f"Fehler beim Laden von {ext}: {e}")
 
-        # 2a) Statische DE->EN Localizations
         await self._apply_de_en_localizations()
 
-        # 2b) Globale Checks
         from .utils.checks import ensure_onboarded
 
         async def _onboard_check(interaction: discord.Interaction) -> bool:
@@ -65,7 +59,6 @@ class FazzerBot(commands.Bot):
                     if sub.name not in {"setlang", "onboard", "set_timezone"}:
                         sub.checks.append(_onboard_check)  # type: ignore[attr-defined]
 
-        # 2c) Tree-Error-Handler
         from .utils.replies import reply_text, reply_error
 
         async def _tree_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -111,7 +104,6 @@ class FazzerBot(commands.Bot):
 
         self.tree.on_error = _tree_error_handler
 
-        # 3) Slash-Commands synchronisieren
         try:
             TEST_GUILD_ID = None
             if TEST_GUILD_ID:
@@ -122,7 +114,6 @@ class FazzerBot(commands.Bot):
         except Exception as e:
             log.exception(f"Slash-Command-Sync fehlgeschlagen: {e}")
 
-        # 4) Presence
         try:
             await self.change_presence(
                 activity=discord.Activity(type=discord.ActivityType.listening, name="/help • /features"),
@@ -138,7 +129,6 @@ class FazzerBot(commands.Bot):
             if getattr(cmd, "description", None):
                 en = await de_to_en_static(cmd.description)
                 cmd.description_localizations = {"en-US": en, "en-GB": en}
-
             for param in getattr(cmd, "parameters", []):
                 desc = getattr(param, "description", None)
                 if desc:
@@ -157,16 +147,17 @@ class FazzerBot(commands.Bot):
 
 
 def run_bot():
-    # Intents
-    intents = discord.Intents.default()
-    intents.message_content = True
-    intents.members = True
-    intents.voice_states = True  # ← empfohlen für VC-Tracking
+    # Intents: alles explizit einschalten, was wir brauchen
+    intents = discord.Intents.none()
+    intents.guilds = True
+    intents.messages = True        # <- wichtig für on_message (Guild)
+    intents.dm_messages = True     # <- wichtig für on_message (DM)
+    intents.message_content = True # <- damit wir Content/Embeds zählen können (privilegierter Intent)
+    intents.members = True         # für Autorole/Welcome/Leave
+    intents.voice_states = True    # VC-Tracking
 
-    # Bot erstellen
     bot = FazzerBot(command_prefix="!", intents=intents)
 
-    # Token prüfen & starten
     if not settings.token:
         raise RuntimeError("DISCORD_TOKEN fehlt. Bitte in Railway unter Variables setzen.")
     bot.run(settings.token)
