@@ -4,7 +4,86 @@ from typing import Optional, Iterable, Tuple
 import discord
 from .timeutil import translate_embed
 from ..services.translation import translate_text_for_guild
-from ..cogs.usage import log_interaction_output
+
+# ─── Usage-Logging (lokal, um Zirkular-Import zu vermeiden) ────────────────
+from ..db import execute
+from ..services.guild_config import get_guild_cfg
+
+def _safe_len(s: Optional[str]) -> int:
+    return len(s or "")
+
+def _count_embed_chars(embed: discord.Embed) -> int:
+    n = 0
+    n += _safe_len(embed.title)
+    n += _safe_len(embed.description)
+    if embed.footer and getattr(embed.footer, "text", None):
+        n += _safe_len(embed.footer.text)
+    if embed.author and getattr(embed.author, "name", None):
+        n += _safe_len(embed.author.name)
+    for f in (embed.fields or []):
+        n += _safe_len(f.name)
+        n += _safe_len(f.value)
+    return n
+
+def _total_message_chars(content: Optional[str], embeds: Iterable[discord.Embed] | None) -> int:
+    total = _safe_len(content)
+    if embeds:
+        for e in embeds:
+            total += _count_embed_chars(e)
+    return total
+
+async def _guild_lang(guild_id: Optional[int]) -> str:
+    if not guild_id:
+        return "dm"
+    try:
+        cfg = await get_guild_cfg(guild_id)
+        lang = str(cfg.get("lang") or "de").lower()
+        return lang if lang in {"de", "en"} else "de"
+    except Exception:
+        return "de"
+
+async def log_interaction_output(
+    inter: discord.Interaction,
+    *,
+    content: Optional[str] = None,
+    embed: Optional[discord.Embed] = None,
+    embeds: Optional[list[discord.Embed]] = None,
+    message_type: str = "ephemeral",
+) -> None:
+    """
+    Ephemeral-/Interaction-Antwort protokollieren (wird nicht von on_message erfasst).
+    Nur EIN Insert pro tatsächlichem Send.
+    """
+    try:
+        if embeds is None and embed is not None:
+            embeds = [embed]
+        chars = _total_message_chars(content, embeds or [])
+        if chars <= 0:
+            return
+
+        guild_id = inter.guild_id
+        channel_id = inter.channel_id
+        user_id = inter.user.id if inter.user else None
+        lang = await _guild_lang(guild_id)
+
+        await execute(
+            """
+            INSERT INTO public.output_usage
+                (ts, guild_id, channel_id, user_id, message_type, chars, lang, is_dm, is_ephemeral)
+            VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            guild_id,
+            channel_id,
+            user_id,
+            message_type,
+            int(chars),
+            lang,
+            False,   # Interactions sind keine DMs
+            True,    # hier: speziell ephemeral
+        )
+    except Exception:
+        # Logging darf niemals das Antworten verhindern
+        pass
 
 # ----------------------------- Farb-/Style-Helfer -----------------------------
 
@@ -76,8 +155,7 @@ async def _send_interaction(inter: discord.Interaction, *, embed: discord.Embed,
         else:
             res = await inter.followup.send(embed=embed, ephemeral=ephemeral)
 
-        # ✨ NEU: Ephemeral-Antwort protokollieren (sichtbare Channel-Replies
-        # werden vom Usage-Logger via on_message erfasst)
+        # ✨ Ephemeral-Antwort protokollieren (sichtbare Replies loggt on_message)
         if ephemeral:
             try:
                 await log_interaction_output(inter, embed=embed, message_type="ephemeral")
