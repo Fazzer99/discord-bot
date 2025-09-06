@@ -212,35 +212,58 @@ async def tracked_send(
     """
     Dünner Wrapper um .send() / .reply(), der NICHT selbst loggt.
     Sichtbare Nachrichten werden automatisch im UsageLogger.on_message gezählt.
+
+    Meta-Parameter (werden NICHT an Discord weitergegeben):
+      - guild_id, user_id, lang, message_type, is_ephemeral, is_dm
     """
-    # embeds vereinheitlichen
+    # 1) Meta-Keys entfernen, damit Discord.py sich nicht beschwert
+    META_KEYS = {"guild_id", "user_id", "lang", "message_type", "is_ephemeral", "is_dm"}
+    for k in list(kwargs.keys()):
+        if k in META_KEYS:
+            kwargs.pop(k, None)
+
+    # 2) embeds vereinheitlichen
     embeds_list = list(embeds) if embeds is not None else None
     if embed is not None:
-        if embeds_list is None:
-            embeds_list = [embed]
-        else:
-            embeds_list = list(embeds_list) + [embed]
+      if embeds_list is None:
+          embeds_list = [embed]
+      else:
+          embeds_list = list(embeds_list) + [embed]
 
-    # Ziel ermitteln und senden
+    # 3) Ziel ermitteln und senden
     try:
         if isinstance(target, discord.Message):
             # Reply auf eine vorhandene Nachricht
-            return await target.reply(content=content, embed=None if embeds_list else None,
-                                      embeds=embeds_list, view=view, **kwargs)
+            return await target.reply(
+                content=content,
+                embed=None if embeds_list else None,
+                embeds=embeds_list,
+                view=view,
+                **kwargs
+            )
 
-        # Alles andere, was sendbar ist
         send_fn = getattr(target, "send", None)
         if callable(send_fn):
-            return await send_fn(content=content, embed=None if embeds_list else None,
-                                 embeds=embeds_list, view=view, **kwargs)
+            return await send_fn(
+                content=content,
+                embed=None if embeds_list else None,
+                embeds=embeds_list,
+                view=view,
+                **kwargs
+            )
 
-        # Fallback: versuche auf channel zu gehen, falls target sowas hat
+        # Fallback: versuche target.channel.send
         ch = getattr(target, "channel", None)
         if ch and hasattr(ch, "send"):
-            return await ch.send(content=content, embed=None if embeds_list else None,
-                                 embeds=embeds_list, view=view, **kwargs)
+            return await ch.send(
+                content=content,
+                embed=None if embeds_list else None,
+                embeds=embeds_list,
+                view=view,
+                **kwargs
+            )
     except Exception:
-        # Niemals die Bot-Laufzeit killen
+        # Fehler weiterreichen, damit der Aufrufer loggen kann
         raise
 
     # Wenn gar kein send() verfügbar war:
