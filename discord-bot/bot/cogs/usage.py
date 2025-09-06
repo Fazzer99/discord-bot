@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Optional, Iterable, Literal, Sequence
 from datetime import datetime, timedelta, timezone
+import logging
 
 import discord
 from discord import app_commands
@@ -10,8 +11,9 @@ from discord.ext import commands
 from ..db import execute, fetch
 from ..services.guild_config import get_guild_cfg
 from ..config import settings
-from ..utils.replies import make_embed, send_embed, reply_text
+from ..utils.replies import make_embed, send_embed, reply_text, tracked_send
 
+log = logging.getLogger("ignix.usage")
 
 # ───────────────────────────── Helpers: Counting ─────────────────────────────
 
@@ -19,7 +21,6 @@ def _safe_len(s: Optional[str]) -> int:
     return len(s or "")
 
 def count_embed_chars(embed: discord.Embed) -> int:
-    """Zählt alle sichtbaren Texte im Embed."""
     n = 0
     n += _safe_len(embed.title)
     n += _safe_len(embed.description)
@@ -40,7 +41,6 @@ def total_message_chars(content: Optional[str], embeds: Iterable[discord.Embed] 
     return total
 
 async def _guild_lang(guild_id: Optional[int]) -> str:
-    """Liest die Guild-Sprache aus der Config; Fallback 'de'. Für DMs → 'dm'."""
     if not guild_id:
         return "dm"
     try:
@@ -51,9 +51,7 @@ async def _guild_lang(guild_id: Optional[int]) -> str:
         return "de"
 
 
-# ───────────────────── Exported helper: for replies.py ──────────────────────
-# (replies.py ruft das nach erfolgreichen *ephemeral* Interaction-Sends auf)
-
+# ───────────────────── Export für replies.py (ephemeral logging) ────────────
 async def log_interaction_output(
     inter: discord.Interaction,
     *,
@@ -62,10 +60,6 @@ async def log_interaction_output(
     embeds: Optional[list[discord.Embed]] = None,
     message_type: str = "ephemeral",
 ) -> None:
-    """
-    Loggt eine Interaction-Antwort (typisch: ephemeral),
-    damit diese in output_usage landet (on_message sieht die ja nicht).
-    """
     try:
         if embeds is None and embed is not None:
             embeds = [embed]
@@ -84,18 +78,11 @@ async def log_interaction_output(
                 (ts, guild_id, channel_id, user_id, message_type, chars, lang, is_dm, is_ephemeral)
             VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8)
             """,
-            guild_id,
-            channel_id,
-            user_id,
-            message_type,
-            int(chars),
-            lang,
-            False,  # Interactions sind keine DMs
-            True,   # hier speziell: ephemeral
+            guild_id, channel_id, user_id, message_type, int(chars), lang, False, True,
         )
-    except Exception:
-        # Logging darf niemals Antworten verhindern
-        pass
+        log.debug("[EPH] +%s chars (gid=%s cid=%s uid=%s)", chars, guild_id, channel_id, user_id)
+    except Exception as e:
+        log.exception("ephemeral log failed: %r", e)
 
 
 # ───────────────────────────── The Usage Cog ────────────────────────────────
@@ -103,7 +90,6 @@ async def log_interaction_output(
 RangeOpt = Literal["today", "yesterday", "7d", "30d", "custom"]
 BreakdownOpt = Literal["total", "by_guild", "by_channel", "by_lang", "by_type"]
 LangOpt = Literal["any", "de", "en", "dm"]
-
 
 def _owner_only(user: discord.abc.User) -> bool:
     return int(user.id) == int(settings.owner_id)
@@ -114,12 +100,10 @@ def _time_window(
     to_iso: Optional[str],
     now: Optional[datetime] = None,
 ) -> tuple[datetime, datetime, str]:
-    """Gibt (start, end, label) in UTC zurück."""
     now = now or datetime.now(timezone.utc)
     if range_opt == "today":
         start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        label = "Heute"
-        return start, now, label
+        return start, now, "Heute"
     if range_opt == "yesterday":
         midnight = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         start = midnight - timedelta(days=1)
@@ -129,7 +113,6 @@ def _time_window(
     if range_opt == "30d":
         return now - timedelta(days=30), now, "Letzte 30 Tage"
 
-    # custom
     try:
         start = datetime.fromisoformat((from_iso or "").strip())
     except Exception:
@@ -145,42 +128,45 @@ def _time_window(
     return start, end, "Benutzerdefiniert"
 
 def _flag_array(include: bool) -> Sequence[bool]:
-    """Für ANY(boolean[]) im SQL."""
     return [True, False] if include else [False]
 
 
 class UsageCog(commands.Cog):
-    """Bündelt: (1) sichtbares Output-Logging  (2) /bot_usage Dashboard."""
+    """(1) Logging sichtbarer Bot-Outputs  (2) /bot_usage Dashboard  (3) /usage_diag Diagnose"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        log.info("[USAGE] UsageCog geladen (listeners aktiv)")
 
     # 1) Sichtbare Bot-Nachrichten (Channel & DM) loggen
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
-        # Wir zählen NUR Nachrichten des eigenen Bots ODER Webhook-Messages,
-        # die von *unserer* Anwendung stammen (Interaction-/Followup-Posts).
         try:
-            is_own_bot_msg = (self.bot.user is not None and msg.author.id == self.bot.user.id)
+            bot_id = getattr(self.bot.user, "id", None)
+            is_own_bot_msg = (bot_id is not None and msg.author.id == bot_id)
+            has_interaction = getattr(msg, "interaction", None) is not None
+            is_our_webhook_msg = (msg.webhook_id is not None) and (getattr(msg.author, "bot", False) or has_interaction)
 
-            # Webhook-Fälle: interaction/followup sendet als Webhook.
-            # Wir erkennen sie zuverlässig über msg.webhook_id != None.
-            # Um false positives (fremde Webhooks) zu vermeiden, lassen wir NUR zu,
-            # wenn entweder (a) author.bot True ist ODER (b) msg.interaction existiert.
-            is_our_webhook_msg = (
-                msg.webhook_id is not None and
-                (getattr(msg.author, "bot", False) or getattr(msg, "interaction", None) is not None)
+            # Debug: Rohdaten
+            log.debug(
+                "[EVT] on_message id=%s author=%s (bot=%s) webhook_id=%s has_interaction=%s content_len=%s embeds=%s",
+                getattr(msg, "id", "?"),
+                getattr(getattr(msg, "author", None), "id", "?"),
+                getattr(getattr(msg, "author", None), "bot", "?"),
+                getattr(msg, "webhook_id", None),
+                has_interaction,
+                len(msg.content or ""),
+                len(msg.embeds or []),
             )
 
             if not (is_own_bot_msg or is_our_webhook_msg):
                 return
 
-            # Ephemeral tauchen hier gar nicht auf; alles hier ist sichtbar
             is_dm = isinstance(msg.channel, (discord.DMChannel, discord.GroupChannel))
             guild_id = msg.guild.id if msg.guild else None
             channel_id = msg.channel.id
 
-            # Bei DM: Empfänger (best effort)
+            # DM-Empfänger best effort
             user_id = None
             if is_dm:
                 try:
@@ -188,15 +174,12 @@ class UsageCog(commands.Cog):
                 except Exception:
                     user_id = None
 
-            # Zeichen zählen (Content + Embeds). Ohne Message Content Intent ist msg.content leer,
-            # Embeds zählen trotzdem.
-            from ..utils.replies import _total_message_chars  # lokaler Import, um Zirkularität zu vermeiden
-            chars = _total_message_chars(msg.content, msg.embeds)
+            # Counting
+            chars = total_message_chars(msg.content, msg.embeds)
+            log.debug("[CNT] computed chars=%s (gid=%s cid=%s is_dm=%s)", chars, guild_id, channel_id, is_dm)
             if chars <= 0:
                 return
 
-            # Sprache bestimmen
-            from ..utils.replies import _guild_lang  # ebenfalls lokaler Import
             lang = await _guild_lang(guild_id)
 
             await execute(
@@ -205,19 +188,14 @@ class UsageCog(commands.Cog):
                     (ts, guild_id, channel_id, user_id, message_type, chars, lang, is_dm, is_ephemeral)
                 VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8)
                 """,
-                guild_id,
-                channel_id,
-                user_id,
+                guild_id, channel_id, user_id,
                 "dm" if is_dm else "channel",
-                int(chars),
-                lang,
-                bool(is_dm),
-                False,
+                int(chars), lang, bool(is_dm), False,
             )
+            log.info("[INS] +%s chars into output_usage (gid=%s cid=%s dm=%s)", chars, guild_id, channel_id, is_dm)
 
-        except Exception:
-            # Logging darf nie die Laufzeit stören
-            pass
+        except Exception as e:
+            log.exception("[ERR] on_message logging failed: %r", e)
 
     # 2) Dashboard /bot_usage (Owner)
     @app_commands.command(name="bot_usage", description="(Owner) Usage-Dashboard des Bots anzeigen.")
@@ -291,12 +269,13 @@ class UsageCog(commands.Cog):
         """
         params = [start, end, gid, cid, lang_filter, dm_flags, eph_flags]
 
-        # Gesamt
         total_row = await fetch(
             f"SELECT COALESCE(SUM(chars),0) AS total FROM public.output_usage WHERE {where}",
             *params
         )
         total = int(total_row[0]["total"]) if total_row else 0
+        log.info("[DASH] total=%s window=%s..%s gid=%s cid=%s lang=%s dm=%s eph=%s",
+                 total, start, end, gid, cid, lang_filter, dm_flags, eph_flags)
 
         desc = (
             f"**Zeitraum:** {label}\n"
@@ -338,7 +317,8 @@ class UsageCog(commands.Cog):
             lines = []
             for r in rows:
                 gid_ = r["guild_id"]
-                gname = "DM" if gid_ is None else (self.bot.get_guild(int(gid_)).name if self.bot.get_guild(int(gid_)) else f"Guild {gid_}")
+                g = self.bot.get_guild(int(gid_)) if gid_ is not None else None
+                gname = "DM" if gid_ is None else (g.name if g else f"Guild {gid_}")
                 lines.append(f"• **{gname}** — `{int(r['sum']):,}`")
             emb = make_embed(title="Top Guilds (Zeichen)", description="\n".join(lines), kind="info")
             await send_embed(interaction, emb, ephemeral=True)
@@ -405,6 +385,69 @@ class UsageCog(commands.Cog):
             emb = make_embed(title="Nach Nachrichtentyp", description="\n".join(lines), kind="info")
             await send_embed(interaction, emb, ephemeral=True)
             return
+
+    # 3) Diagnose: prüft Intents, erzeugt Test-Output, schreibt Test-Row
+    @app_commands.command(name="usage_diag", description="(Owner) Diagnose für Usage-Logging.")
+    @app_commands.describe(post_test_message="Sichtbare Testnachricht im aktuellen Kanal posten?")
+    async def usage_diag(self, interaction: discord.Interaction, post_test_message: bool = True):
+        if not _owner_only(interaction.user):
+            await reply_text(interaction, "❌ Nur der Bot-Owner.", kind="error", ephemeral=True)
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        intents = interaction.client.intents
+        intent_info = (
+            f"guilds={intents.guilds}, messages={intents.messages}, "
+            f"dm_messages={intents.dm_messages}, message_content={intents.message_content}, "
+            f"members={intents.members}, voice_states={intents.voice_states}"
+        )
+
+        # (A) optional: sichtbare Testnachricht -> sollte on_message triggern
+        if post_test_message and isinstance(interaction.channel, discord.abc.Messageable):
+            try:
+                emb = make_embed(title="Usage-Test", description="Dieser Post sollte geloggt werden.", kind="info")
+                await tracked_send(interaction.channel, embed=emb)
+                log.info("[DIAG] posted visible test message in cid=%s", interaction.channel.id)
+            except Exception as e:
+                log.exception("[DIAG] failed to post test message: %r", e)
+
+        # (B) direkte Testzeile in DB inserten (um DB-Pfad zu prüfen)
+        try:
+            await execute(
+                """
+                INSERT INTO public.output_usage
+                    (ts, guild_id, channel_id, user_id, message_type, chars, lang, is_dm, is_ephemeral)
+                VALUES (now(), $1, $2, $3, 'diag', 7, 'de', false, false)
+                """,
+                interaction.guild_id, interaction.channel_id, interaction.user.id
+            )
+            db_ok = True
+        except Exception as e:
+            db_ok = False
+            log.exception("[DIAG] direct insert failed: %r", e)
+
+        # (C) Summen abfragen (letzte 10min)
+        start = datetime.now(timezone.utc) - timedelta(minutes=10)
+        rows = await fetch(
+            "SELECT COUNT(*) AS n_rows, COALESCE(SUM(chars),0) AS sum FROM public.output_usage WHERE ts >= $1",
+            start
+        )
+        n_rows = int(rows[0]["n_rows"]) if rows else 0
+        sum_chars = int(rows[0]["sum"]) if rows else 0
+
+        emb = make_embed(
+            title="🧪 Usage Diagnose",
+            kind="info",
+            fields=[
+                ("Intents", f"`{intent_info}`", False),
+                ("DB Test-Insert", "OK ✅" if db_ok else "FEHLER ❌", False),
+                ("Letzte 10 Minuten", f"Rows: **{n_rows}**, Zeichen: **{sum_chars}**", False),
+                ("Hinweis", "Wenn die sichtbare Testnachricht nicht gezählt wurde, prüfe Logs [EVT]/[CNT]/[INS].", False),
+            ],
+        )
+        await send_embed(interaction, emb, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
