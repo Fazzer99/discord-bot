@@ -4,7 +4,7 @@ from typing import Optional, Iterable, Tuple
 import discord
 from .timeutil import translate_embed
 from ..services.translation import translate_text_for_guild
-from ..usage import log_interaction_output
+from ..cogs.usage import log_interaction_output
 
 # ----------------------------- Farb-/Style-Helfer -----------------------------
 

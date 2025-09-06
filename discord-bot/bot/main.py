@@ -22,7 +22,7 @@ EXTENSIONS = [
     "bot.cogs.verify",
     "bot.cogs.welcome_leave",
     "bot.cogs.owner_tools",
-    "bot.usage",
+    "bot.cogs.usage",
 ]
 
 # Basic logging (Railway-Logs)
